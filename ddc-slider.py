@@ -37,6 +37,7 @@ import subprocess
 import argparse
 import dataclasses
 import json
+import importlib
 import os
 import re
 import sys
@@ -1217,19 +1218,21 @@ class TrayApp:
         n = len(monitors)
         tooltip = _("tooltip_multi", n=n) if n > 1 else _("tooltip")
 
-        if not self._setup_status_icon(tooltip):
+        # GtkStatusIcon shows nothing on Wayland, so only use it on X11
+        on_x11 = os.environ.get("XDG_SESSION_TYPE") != "wayland" and bool(os.environ.get("DISPLAY"))
+        if on_x11 and self._setup_status_icon(tooltip):
+            return
+        for name in ("AyatanaAppIndicator3", "AppIndicator3"):
             try:
-                gi.require_version('AyatanaAppIndicator3', '0.1')
-                from gi.repository import AyatanaAppIndicator3
-                self._setup_appindicator(AyatanaAppIndicator3, tooltip)
+                gi.require_version(name, "0.1")
+                lib = importlib.import_module(f"gi.repository.{name}")
+                self._setup_appindicator(lib, tooltip)
+                return
             except (ValueError, ImportError):
-                try:
-                    gi.require_version('AppIndicator3', '0.1')
-                    from gi.repository import AppIndicator3
-                    self._setup_appindicator(AppIndicator3, tooltip)
-                except (ValueError, ImportError):
-                    print(f"[{APP_NAME}] ERROR: No tray icon backend available!", file=sys.stderr)
-                    sys.exit(1)
+                continue
+        print(f"[{APP_NAME}] ERROR: No tray icon backend available "
+              "(install libayatana-appindicator)!", file=sys.stderr)
+        sys.exit(1)
 
     def _save_current_state(self):
         """Collect current slider values and write state cache."""
