@@ -130,6 +130,8 @@ ddc-slider --set-contrast 50   # Set contrast to 50 and exit
 | Scroll wheel | Adjust brightness (all monitors) |
 | Right-click | Presets, redshift toggle, quit |
 
+On Wayland (StatusNotifierItem trays), left-click and scroll wheel are not available. Right-click → *Brightness slider* (or middle-click) opens the popup.
+
 See `man ddc-slider` for full documentation.
 
 ## Configuration
