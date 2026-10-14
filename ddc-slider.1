@@ -84,18 +84,29 @@ Context menu with presets, redshift toggle, and quit.
 .PP
 On Wayland, left-click and scroll wheel are not available.
 Open the popup from the first right-click menu entry, or with middle-click.
+.SH WAYLAND
+With
+.B gtk-layer-shell
+installed, the popup is anchored to the top-right corner below the bar.
+Set \fBpopup_margin_right\fR (pixels from the right screen edge, default 300)
+to line it up with the tray icon.
 .SH COLOR TEMPERATURE
 Each monitor row in the popup has its own color-temperature slider
 (3000\(enKelvin\(en6500K, neutral at 6500K). In multi-monitor mode the
 master row broadcasts to all monitors. Values are persisted in the state
 cache and re-applied on launch, since X gamma resets per session.
 .PP
-Per-monitor scoping uses
+On Wayland, color temperature uses
+.B gammastep -m wayland:output=NAME -O
+with one process per output; the processes keep running to hold the setting.
+The compositor's own night light must be off.
+.PP
+On X11, per-monitor scoping uses
 .B redshift -m randr:crtc=N
 where the CRTC index is resolved by mapping the I2C bus through
 \fI/sys/class/drm/<connector>/ddc\fR to a DRM connector and matching it
 against \fBxrandr --verbose\fR. When the mapping cannot be resolved
-(Wayland, headless, or single-monitor setups), \fBddc-slider\fR falls back
+(headless or single-monitor setups), \fBddc-slider\fR falls back
 to a global \fBredshift -O\fR call that tints the whole X session.
 .SH CONFIGURATION
 The config file at \fI~/.config/ddc-slider/config.json\fR supports:

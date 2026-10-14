@@ -33,6 +33,12 @@ gi.require_version('Gtk', '3.0')
 
 from gi.repository import Gtk, Gdk, GLib
 
+try:
+    gi.require_version('GtkLayerShell', '0.1')
+    from gi.repository import GtkLayerShell
+except (ValueError, ImportError):
+    GtkLayerShell = None
+
 import subprocess
 import argparse
 import dataclasses
@@ -281,6 +287,7 @@ DEFAULT_MIN = 0
 DEFAULT_MAX = 100
 DEFAULT_STEP = 5
 DEFAULT_SCROLL_STEP = 2
+DEFAULT_POPUP_MARGIN_RIGHT = 300   # Wayland: px from the right edge, roughly under the tray icon
 STATE_MAX_AGE = 86400  # 24 hours
 ICON_NAME_FALLBACK = "display-brightness-symbolic"
 
@@ -356,6 +363,11 @@ def _get_icon_path(icon_style: str | None = None) -> str:
 # ---------------------------------------------------------------------------
 #  Data model
 # ---------------------------------------------------------------------------
+
+_ON_WAYLAND = os.environ.get("XDG_SESSION_TYPE") == "wayland"
+_gammastep_procs: dict[str, subprocess.Popen] = {}
+_gammastep_lock = threading.Lock()
+
 
 @dataclasses.dataclass
 class MonitorInfo:
@@ -919,8 +931,21 @@ class _SliderGroup:
 class BrightnessPopup(Gtk.Window):
 
     def __init__(self, monitors: list[MonitorInfo], min_val: int, max_val: int, step: int,
-                 on_color_temp=None, on_value_changed=None):
+                 on_color_temp=None, on_value_changed=None,
+                 margin_right: int = DEFAULT_POPUP_MARGIN_RIGHT):
         super().__init__(type=Gtk.WindowType.TOPLEVEL)
+
+        # Wayland clients can't position toplevels; anchor under the top bar instead
+        self._layer = bool(GtkLayerShell and _ON_WAYLAND
+                           and GtkLayerShell.is_supported())
+        if self._layer:
+            GtkLayerShell.init_for_window(self)
+            GtkLayerShell.set_layer(self, GtkLayerShell.Layer.TOP)
+            GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.TOP, True)
+            GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.RIGHT, True)
+            GtkLayerShell.set_margin(self, GtkLayerShell.Edge.TOP, 4)
+            GtkLayerShell.set_margin(self, GtkLayerShell.Edge.RIGHT, margin_right)
+            GtkLayerShell.set_keyboard_mode(self, GtkLayerShell.KeyboardMode.ON_DEMAND)
 
         self.monitors = monitors
         self._on_color_temp = on_color_temp   # per-monitor apply callback (monitor, temp)
@@ -942,6 +967,12 @@ class BrightnessPopup(Gtk.Window):
         self.set_gravity(Gdk.Gravity.NORTH_WEST)
         self.set_position(Gtk.WindowPosition.NONE)
 
+        self._poll_id = None
+        self._refreshing = False
+        self._drag_until = 0.0
+
+        self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
+        self.connect("button-press-event", self._on_button_press)
         self.connect("focus-out-event", self._on_focus_out)
         self.connect("key-press-event", self._on_key_press)
         self.connect("show", lambda w: self._set_visible(True))
@@ -1057,6 +1088,10 @@ class BrightnessPopup(Gtk.Window):
 
     def refresh_value(self):
         """Refresh all sliders from hardware in background thread."""
+        if self._refreshing:
+            return
+        self._refreshing = True
+
         def _do_refresh():
             results = {}
             for group in self._monitor_groups:
@@ -1070,6 +1105,7 @@ class BrightnessPopup(Gtk.Window):
 
     def _apply_hw_results(self, results: dict):
         """Apply hardware-read values to sliders (main thread)."""
+        self._refreshing = False
         for group in self._monitor_groups:
             vals = results.get(group.monitor.bus)
             if vals:
@@ -1123,14 +1159,45 @@ class BrightnessPopup(Gtk.Window):
 
     def _set_visible(self, visible):
         self._visible = visible
+        if visible and self._poll_id is None:
+            self._poll_id = GLib.timeout_add_seconds(3, self._poll_hardware)
+        elif not visible and self._poll_id is not None:
+            GLib.source_remove(self._poll_id)
+            self._poll_id = None
+
+    def _poll_hardware(self):
+        # Picks up changes made elsewhere (e.g. shell brightness keys)
+        busy = any(g._brightness_debounce or g._contrast_debounce
+                   for g in self._monitor_groups)
+        if not busy and not self._master_busy():
+            self.refresh_value()
+        return True
+
+    def _master_busy(self) -> bool:
+        g = self._master_group
+        return bool(g and (g._brightness_debounce or g._contrast_debounce))
+
+    def _on_button_press(self, widget, event):
+        # Wayland ignores client-side move(); let the compositor drag the window
+        if event.button == 1 and not self._layer:
+            self._drag_until = time.monotonic() + 10
+            self.begin_move_drag(event.button, int(event.x_root),
+                                 int(event.y_root), event.time)
+            return True
+        return False
 
     def _on_focus_out(self, widget, event):
         GLib.timeout_add(100, self._check_focus)
         return False
 
     def _check_focus(self):
-        if not self.is_active():
-            self.hide()
+        if self.is_active():
+            return False
+        # The compositor takes focus during a move; wait for it to come back
+        if time.monotonic() < self._drag_until:
+            GLib.timeout_add(300, self._check_focus)
+            return False
+        self.hide()
         return False
 
     def _on_key_press(self, widget, event):
@@ -1172,6 +1239,7 @@ def load_config(path: str) -> dict:
         result = {
             "scroll_step": cfg.get("scroll_step", DEFAULT_SCROLL_STEP),
             "presets": presets,
+            "popup_margin_right": cfg.get("popup_margin_right", DEFAULT_POPUP_MARGIN_RIGHT),
         }
         if presets:
             print(f"[{APP_NAME}] Config loaded: {len(presets)} presets", file=sys.stderr)
@@ -1190,7 +1258,8 @@ class TrayApp:
     def __init__(self, monitors: list[MonitorInfo], min_val: int, max_val: int, step: int,
                  scroll_step: int = DEFAULT_SCROLL_STEP, presets: list | None = None,
                  cached_state: list[dict] | None = None, icon_style: str | None = None,
-                 original_cmd: str | None = None):
+                 original_cmd: str | None = None,
+                 popup_margin_right: int = DEFAULT_POPUP_MARGIN_RIGHT):
         print(f"[{APP_NAME}] TrayApp init: sys.argv={sys.argv}", file=sys.stderr)
         print(f"[{APP_NAME}] TrayApp init: original_cmd={original_cmd}", file=sys.stderr)
         self.monitors = monitors
@@ -1201,7 +1270,8 @@ class TrayApp:
         self.original_cmd = original_cmd or sys.argv[0]
         self.popup = BrightnessPopup(monitors, min_val, max_val, step,
                                      on_color_temp=self._on_color_temp,
-                                     on_value_changed=self._save_current_state)
+                                     on_value_changed=self._save_current_state,
+                                     margin_right=popup_margin_right)
         self._cached_brightness = None
         self._scroll_debounce_id = None
         self._redshift_paused = False
@@ -1313,6 +1383,9 @@ class TrayApp:
     @staticmethod
     def _apply_redshift_global(temp: int):
         """Fallback: apply color temperature via redshift to the whole X session."""
+        if _ON_WAYLAND:
+            TrayApp._apply_gammastep(temp)
+            return
         try:
             subprocess.Popen(
                 ["redshift", "-P", "-O", str(temp)],
@@ -1322,9 +1395,34 @@ class TrayApp:
             print(f"[{APP_NAME}] redshift not found, skipping color_temp", file=sys.stderr)
 
     @staticmethod
+    def _apply_gammastep(temp: int, output: str | None = None) -> bool:
+        """Wayland: gammastep holds the gamma ramp only while it runs, so keep
+        one process per output (or one for all outputs) and replace it on change."""
+        key = output or ""
+        with _gammastep_lock:
+            old = _gammastep_procs.pop(key, None)
+            if old and old.poll() is None:
+                old.terminate()
+                old.wait()
+            cmd = ["gammastep"]
+            if output:
+                cmd += ["-m", f"wayland:output={output}"]
+            cmd += ["-P", "-O", str(temp)]
+            try:
+                _gammastep_procs[key] = subprocess.Popen(
+                    cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except FileNotFoundError:
+                print(f"[{APP_NAME}] gammastep not found, skipping color_temp",
+                      file=sys.stderr)
+                return False
+        return True
+
+    @staticmethod
     def _apply_color_temp_for_monitor(monitor: MonitorInfo, temp: int) -> bool:
         """Apply color temperature to a single monitor via redshift's randr
         backend, scoped to the monitor's CRTC. Returns True on success."""
+        if _ON_WAYLAND:
+            return TrayApp._apply_gammastep(temp, monitor.output_name)
         if monitor.crtc_index is None:
             return False
         try:
@@ -1935,7 +2033,8 @@ State:  {DEFAULT_STATE_PATH}
         app = TrayApp(monitors, args.min, args.max, args.step,
                       scroll_step=scroll_step, presets=presets,
                       cached_state=cached_state, icon_style=icon_style,
-                      original_cmd=sys.argv[0])
+                      original_cmd=sys.argv[0],
+                      popup_margin_right=config.get("popup_margin_right", DEFAULT_POPUP_MARGIN_RIGHT))
 
     Gtk.main()
 

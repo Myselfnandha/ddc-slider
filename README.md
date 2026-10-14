@@ -17,7 +17,8 @@ Works with any desktop environment or window manager that has a system tray (tin
 - **Tray icon** — left-click opens popup, scroll wheel adjusts brightness, right-click for presets, refresh, redshift toggle
 - **Refresh monitors** — re-detect monitor hardware and clear state cache from right-click menu
 - **Standalone mode** — floating window as an alternative to the tray (`--standalone`)
-- **Color temperature** — per-monitor slider (3000K–6500K) via redshift's randr backend, scoped to each monitor's CRTC; falls back to a global redshift call when the I2C bus → randr output mapping isn't resolvable
+- **Color temperature** — per-monitor slider (3000K–6500K). X11: redshift's randr backend, scoped to each monitor's CRTC. Wayland: gammastep, one process per output
+- **Wayland and X11** — runs on both; on Wayland the popup is anchored top-right under the bar (layer-shell)
 - **Configurable presets** — define brightness/contrast/color_temp combos in a JSON config
 - **Light & dark icons** — embedded SVG tray icons with auto-detection or manual override (`--icon light|dark`)
 - **Lightweight** — single Python file, no build step, no pip packages
@@ -28,7 +29,8 @@ Works with any desktop environment or window manager that has a system tray (tin
 - [ddcutil](https://www.ddcutil.com/)
 - Python 3.10+
 - GTK 3 (`python3-gi`, `gir1.2-gtk-3.0`)
-- redshift (optional, for color temperature)
+- redshift (optional, for color temperature on X11)
+- gammastep (optional, for color temperature on Wayland)
 - User must be in the `i2c` group
 
 ## Installation
@@ -131,6 +133,12 @@ ddc-slider --set-contrast 50   # Set contrast to 50 and exit
 | Right-click | Presets, redshift toggle, quit |
 
 On Wayland (StatusNotifierItem trays), left-click and scroll wheel are not available. Right-click → *Brightness slider* (or middle-click) opens the popup.
+
+### Wayland
+
+- Install `gtk-layer-shell` and `gammastep`.
+- Turn off the compositor's own night light (gammastep needs the gamma control), e.g. `noctalia msg nightlight-disable`.
+- Set `popup_margin_right` in the config to move the popup under the tray icon (pixels from the right screen edge, default 300).
 
 See `man ddc-slider` for full documentation.
 
