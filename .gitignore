@@ -9,3 +9,14 @@
 
 __pycache__/
 CLAUDE.md
+claude.md
+*.pyc
+*.pyo
+*.o
+*.a
+*.so
+
+packaging/src/
+packaging/pkg/
+packaging/*.pkg.tar.*
+packaging/*.tar.gz

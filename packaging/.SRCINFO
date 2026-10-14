@@ -1,0 +1,18 @@
+pkgbase = ddc-slider
+	pkgdesc = Tray icon and window to control monitor brightness and contrast via DDC/CI
+	pkgver = 1.1.0
+	pkgrel = 1
+	url = https://github.com/musqz/ddc-slider
+	arch = any
+	license = MIT
+	depends = python
+	depends = python-gobject
+	depends = gtk3
+	depends = ddcutil
+	depends = libayatana-appindicator
+	optdepends = redshift: color temperature on X11
+	optdepends = gammastep: color temperature on Wayland
+	optdepends = gtk-layer-shell: popup placement on Wayland
+	optdepends = xorg-xrandr: map monitors to X outputs for color temperature
+
+pkgname = ddc-slider

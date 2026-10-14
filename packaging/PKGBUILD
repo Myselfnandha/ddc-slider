@@ -1,0 +1,29 @@
+# Maintainer: musqz
+pkgname=ddc-slider
+pkgver=1.1.0
+pkgrel=1
+pkgdesc='Tray icon and window to control monitor brightness and contrast via DDC/CI'
+arch=('any')
+url='https://github.com/musqz/ddc-slider'
+license=('MIT')
+depends=('python' 'python-gobject' 'gtk3' 'ddcutil' 'libayatana-appindicator')
+optdepends=('redshift: color temperature on X11'
+            'gammastep: color temperature on Wayland'
+            'gtk-layer-shell: popup placement on Wayland'
+            'xorg-xrandr: map monitors to X outputs for color temperature')
+# Local build from the working tree. For AUR, replace with the release tarball:
+#   source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+#   and change srcdir below to "$srcdir/$pkgname-$pkgver".
+source=()
+sha256sums=()
+
+package() {
+  local srcdir_repo="$startdir/.."
+
+  install -Dm755 "$srcdir_repo/ddc-slider.py" "$pkgdir/usr/bin/ddc-slider"
+  echo "v$pkgver" | install -Dm644 /dev/stdin "$pkgdir/usr/share/ddc-slider/release.txt"
+  sed "s/__VERSION__/v$pkgver/g" "$srcdir_repo/ddc-slider.1" \
+    | install -Dm644 /dev/stdin "$pkgdir/usr/share/man/man1/ddc-slider.1"
+  install -Dm644 "$srcdir_repo/ddc-slider.desktop" "$pkgdir/usr/share/applications/ddc-slider.desktop"
+  install -Dm644 "$srcdir_repo/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
