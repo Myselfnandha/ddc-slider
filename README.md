@@ -28,7 +28,8 @@ Works with any desktop environment or window manager that has a system tray (tin
 - [ddcutil](https://www.ddcutil.com/)
 - Python 3.10+
 - GTK 3 (`python3-gi`, `gir1.2-gtk-3.0`)
-- redshift (optional, for color temperature)
+- redshift (optional, for color temperature on X11)
+- gammastep (optional, for color temperature on Wayland)
 - User must be in the `i2c` group
 
 ## Installation
