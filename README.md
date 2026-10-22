@@ -1,3 +1,6 @@
+> **This repository has moved to Codeberg: https://codeberg.org/linux-bird/ddc-slider**
+> It is archived here. Please use Codeberg for issues and pull requests.
+
 # ddc-slider 
 
 > Disclaimer: I changed the name to `ddc-slider` 
