@@ -191,6 +191,7 @@ def _(key: str, **kwargs) -> str:
 
 DEFAULT_CONFIG = {
     "scroll_step": 3,
+    "open_on_hotplug": False,
     "include_internal_display": True,
     "show_contrast_slider": True,
     "show_color_temp_slider": True,
@@ -1310,14 +1311,55 @@ class BrightnessPopup(Gtk.Window):
 
         self._sync_master()
 
+    def _reposition_at(self, x: int, y: int):
+        display = Gdk.Display.get_default()
+        monitor = display.get_monitor_at_point(x, y) if display else None
+
+        pref_size = self.get_preferred_size()[1]
+        popup_width = max(310, pref_size.width)
+        popup_height = max(560, pref_size.height)
+
+        if monitor:
+            wa = monitor.get_workarea()
+            px = max(wa.x + 10, min(x - popup_width // 2, wa.x + wa.width - popup_width - 10))
+            if y + popup_height + 10 <= wa.y + wa.height:
+                py = y + 10
+            elif y - popup_height - 10 >= wa.y:
+                py = y - popup_height - 10
+            else:
+                py = max(wa.y + 10, wa.y + wa.height - popup_height - 10)
+        else:
+            px, py = x, y
+
+        self._position = (px, py)
+        self.move(px, py)
+
     def rebuild_monitors(self, new_monitors: list[MonitorInfo]):
+        was_visible = self.get_visible() or self._visible
+        should_open = bool(self.config.get("open_on_hotplug", False))
         self.monitors = new_monitors
         for child in self._main_box.get_children():
             self._main_box.remove(child)
         self._monitor_groups.clear()
         self._master_group = None
         self._populate_ui()
-        self.show_all()
+        self._main_box.show_all()
+        if was_visible or should_open:
+            self.show()
+            self.queue_resize()
+            coords = self._last_toggle_coords
+            if not coords or coords == (100, 100):
+                display = Gdk.Display.get_default()
+                seat = display.get_default_seat() if display else None
+                if seat:
+                    pointer = seat.get_pointer()
+                    _, px, py = pointer.get_position()
+                    coords = (px, py)
+            if coords:
+                self._reposition_at(*coords)
+            self.present()
+        else:
+            self.hide()
 
     def _notify_changed(self):
         if self._on_value_changed:
@@ -1517,27 +1559,7 @@ class BrightnessPopup(Gtk.Window):
             self.refresh_value()
             self._ignore_focus_loss_until = time.time() + 1.0
             self.show_all()
-            display = Gdk.Display.get_default()
-            monitor = display.get_monitor_at_point(x, y) if display else None
-
-            pref_size = self.get_preferred_size()[1]
-            popup_width = max(310, pref_size.width)
-            popup_height = max(560, pref_size.height)
-
-            if monitor:
-                wa = monitor.get_workarea()
-                px = max(wa.x + 10, min(x - popup_width // 2, wa.x + wa.width - popup_width - 10))
-                if y + popup_height + 10 <= wa.y + wa.height:
-                    py = y + 10
-                elif y - popup_height - 10 >= wa.y:
-                    py = y - popup_height - 10
-                else:
-                    py = max(wa.y + 10, wa.y + wa.height - popup_height - 10)
-            else:
-                px, py = x, y
-
-            self._position = (px, py)
-            self.move(px, py)
+            self._reposition_at(x, y)
             self.present()
             if self.get_window():
                 self.get_window().focus(Gdk.CURRENT_TIME)
@@ -1977,10 +1999,7 @@ class TrayApp:
     def _apply_monitors_update(self, new_monitors: list[MonitorInfo]):
         """Apply newly probed monitors to popup, tooltip, and menus in main thread."""
         self.monitors = new_monitors
-        n = len(new_monitors)
-        tooltip = _("tooltip_multi", n=n) if n > 1 else _("tooltip")
-        if self.status_icon:
-            self.status_icon.set_tooltip_text(tooltip)
+        self.update_tooltip()
         if self.indicator:
             self.indicator.set_menu(self._build_menu())
         self.popup.rebuild_monitors(new_monitors)
@@ -2513,7 +2532,8 @@ class StandaloneWindow(Gtk.Window):
         self._monitor_groups.clear()
         self._master_group = None
         self._populate_ui()
-        self.show_all()
+        self._vbox.show_all()
+        self.queue_resize()
 
     def _restore_color_temps(self, cached_state: list[dict]):
         cache_map = {entry["bus"]: entry for entry in cached_state}

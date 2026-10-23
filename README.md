@@ -152,6 +152,7 @@ Config file: `~/.config/ddc-slider/config.json`
 ```json
 {
   "scroll_step": 2,
+  "open_on_hotplug": false,
   "presets": [
     {
       "name": "Movie",
