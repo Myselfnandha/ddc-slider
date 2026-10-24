@@ -1,0 +1,3 @@
+# Assign I2C devices to the 'i2c' group and allow read/write for DDC/CI monitor control
+KERNEL=="i2c-[0-9]*", GROUP="i2c", MODE="0660"
+SUBSYSTEM=="i2c-dev", GROUP="i2c", MODE="0660"

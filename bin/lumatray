@@ -1,0 +1,14 @@
+#!/usr/bin/env python3
+import os
+import sys
+
+# Add src to sys.path if running in-tree
+_repo_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+_src_dir = os.path.join(_repo_dir, "src")
+if os.path.isdir(_src_dir) and _src_dir not in sys.path:
+    sys.path.insert(0, _src_dir)
+
+from lumatray.__main__ import main
+
+if __name__ == "__main__":
+    sys.exit(main())

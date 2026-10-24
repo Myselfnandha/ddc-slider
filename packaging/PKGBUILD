@@ -1,29 +1,44 @@
-# Maintainer: musqz
-pkgname=ddc-slider
-pkgver=1.1.0
+# Maintainer: Nandha
+pkgname=lumatray
+pkgver=3.0.0
 pkgrel=1
-pkgdesc='Tray icon and window to control monitor brightness and contrast via DDC/CI'
+pkgdesc='Next-Generation GTK3 Monitor Control Suite (DDC/CI, Color Management, Smart Automation)'
 arch=('any')
-url='https://github.com/musqz/ddc-slider'
+url='https://github.com/nandha/ddc-slider'
 license=('MIT')
-depends=('python' 'python-gobject' 'gtk3' 'ddcutil' 'libayatana-appindicator')
-optdepends=('redshift: color temperature on X11'
-            'gammastep: color temperature on Wayland'
-            'gtk-layer-shell: popup placement on Wayland'
-            'xorg-xrandr: map monitors to X outputs for color temperature')
-# Local build from the working tree. For AUR, replace with the release tarball:
-#   source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-#   and change srcdir below to "$srcdir/$pkgname-$pkgver".
+depends=(
+    'python'
+    'python-gobject'
+    'gtk3'
+    'ddcutil'
+    'brightnessctl'
+    'xorg-xrandr'
+)
+optdepends=(
+    'libayatana-appindicator: AppIndicator system tray support'
+    'gammastep: Wayland and software color temperature control'
+    'xprintidle: system idle dimming detection'
+)
+provides=('ddc-slider')
+conflicts=('ddc-slider')
 source=()
 sha256sums=()
 
 package() {
   local srcdir_repo="$startdir/.."
 
-  install -Dm755 "$srcdir_repo/ddc-slider.py" "$pkgdir/usr/bin/ddc-slider"
-  echo "v$pkgver" | install -Dm644 /dev/stdin "$pkgdir/usr/share/ddc-slider/release.txt"
-  sed "s/__VERSION__/v$pkgver/g" "$srcdir_repo/ddc-slider.1" \
-    | install -Dm644 /dev/stdin "$pkgdir/usr/share/man/man1/ddc-slider.1"
-  install -Dm644 "$srcdir_repo/ddc-slider.desktop" "$pkgdir/usr/share/applications/ddc-slider.desktop"
+  # Install Python package
+  python -m compileall "$srcdir_repo/src/lumatray"
+  mkdir -p "$pkgdir/usr/lib/python3/dist-packages"
+  cp -r "$srcdir_repo/src/lumatray" "$pkgdir/usr/lib/python3/dist-packages/"
+
+  # Install binaries
+  install -Dm755 "$srcdir_repo/bin/lumatray" "$pkgdir/usr/bin/lumatray"
+  ln -sf /usr/bin/lumatray "$pkgdir/usr/bin/ddc-slider"
+
+  # Install desktop files and systemd
+  install -Dm644 "$srcdir_repo/data/lumatray.desktop" "$pkgdir/usr/share/applications/lumatray.desktop"
+  install -Dm644 "$srcdir_repo/packaging/systemd/lumatray.service" "$pkgdir/usr/lib/systemd/user/lumatray.service"
+  install -Dm644 "$srcdir_repo/packaging/udev/99-i2c-ddc.rules" "$pkgdir/usr/lib/udev/rules.d/99-i2c-ddc.rules"
   install -Dm644 "$srcdir_repo/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

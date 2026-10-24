@@ -1,0 +1,23 @@
+[Desktop Entry]
+Name=LumaTray
+GenericName=Monitor Control Suite
+Comment=Modular monitor control platform with hardware DDC/CI, color management, and smart automation
+Exec=lumatray --show
+Icon=display-brightness-symbolic
+Terminal=false
+Type=Application
+Categories=Settings;HardwareSettings;GTK;
+StartupNotify=true
+Actions=QuickPanel;FullSuite;NightToggle;
+
+[Desktop Action QuickPanel]
+Name=Quick Controls
+Exec=lumatray --show
+
+[Desktop Action FullSuite]
+Name=Open Monitor Control Suite
+Exec=lumatray --show-main
+
+[Desktop Action NightToggle]
+Name=Toggle Night Mode
+Exec=lumatray --toggle-night

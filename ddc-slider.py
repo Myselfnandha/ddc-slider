@@ -189,6 +189,15 @@ def _(key: str, **kwargs) -> str:
     return s
 
 
+DEFAULT_CIRCADIAN_STAGES = [
+    {"name": "Dawn 🌄", "time": "05:30", "brightness": 25, "contrast": 45, "color_temp": 3400},
+    {"name": "Morning 🌅", "time": "07:30", "brightness": 70, "contrast": 65, "color_temp": 5000},
+    {"name": "Daylight ☀", "time": "10:00", "brightness": 100, "contrast": 75, "color_temp": 6500},
+    {"name": "Sunset 🌇", "time": "17:30", "brightness": 70, "contrast": 65, "color_temp": 4500},
+    {"name": "Night 🌙", "time": "20:30", "brightness": 45, "contrast": 55, "color_temp": 3400},
+    {"name": "Late Night 🕯", "time": "23:00", "brightness": 25, "contrast": 45, "color_temp": 2700},
+]
+
 DEFAULT_CONFIG = {
     "scroll_step": 3,
     "open_on_hotplug": False,
@@ -201,6 +210,9 @@ DEFAULT_CONFIG = {
     "night_mode_brightness": 35,
     "night_mode_contrast": 50,
     "auto_schedule_enabled": True,
+    "circadian_enabled": True,
+    "circadian_stages": DEFAULT_CIRCADIAN_STAGES,
+    "manual_override_timeout_min": 45,
     "day_time": "07:00",
     "night_time": "19:00",
     "day_mode_brightness": 100,
@@ -893,6 +905,7 @@ class DDCController:
         self._target_value: int | None = None
         self._target_lock = threading.Lock()
         self._worker_running = False
+        self._last_written_val: int | None = None
 
     def get_value(self) -> int | None:
         with self._lock:
@@ -904,16 +917,22 @@ class DDCController:
                 )
                 m = re.search(r'VCP\s+\w+\s+\w+\s+(\d+)\s+(\d+)', result.stdout)
                 if m:
-                    return int(m.group(1))
+                    val = int(m.group(1))
+                    self._last_written_val = val
+                    return val
                 m = re.search(r'current value\s*=\s*(\d+)', result.stdout)
                 if m:
-                    return int(m.group(1))
+                    val = int(m.group(1))
+                    self._last_written_val = val
+                    return val
                 return None
             except Exception:
                 return None
 
     def set_value(self, value: int) -> bool:
         value = max(0, min(100, int(value)))
+        if value == self._last_written_val:
+            return True
         with self._target_lock:
             self._target_value = value
             if self._worker_running:
@@ -928,11 +947,15 @@ class DDCController:
                         self._worker_running = False
                         break
                     self._target_value = None
+                if val == self._last_written_val:
+                    continue
                 with self._lock:
                     try:
                         cmd = ["ddcutil", "setvcp", self._feature_hex, str(val),
                                "--bus", str(self.bus), "--noverify"]
-                        subprocess.run(cmd, capture_output=True, text=True, timeout=8)
+                        res = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
+                        if res.returncode == 0:
+                            self._last_written_val = val
                     except Exception:
                         pass
 
@@ -1155,7 +1178,8 @@ class _SliderGroup:
 class BrightnessPopup(Gtk.Window):
 
     def __init__(self, monitors: list[MonitorInfo], min_val: int, max_val: int, step: int,
-                 on_color_temp=None, on_contrast=None, on_value_changed=None, config: dict | None = None):
+                 on_color_temp=None, on_contrast=None, on_value_changed=None, config: dict | None = None,
+                 on_toggle_auto=None, is_auto_enabled=None):
         super().__init__(type=Gtk.WindowType.TOPLEVEL)
 
         self.monitors = monitors
@@ -1166,6 +1190,9 @@ class BrightnessPopup(Gtk.Window):
         self._on_color_temp = on_color_temp
         self._on_contrast = on_contrast
         self._on_value_changed = on_value_changed
+        self._on_toggle_auto = on_toggle_auto
+        self._is_auto_enabled = is_auto_enabled
+        self._auto_btn: Gtk.Button | None = None
         self._visible = False
         self._position = (0, 0)
         self._last_toggle_coords = (100, 100)
@@ -1173,6 +1200,7 @@ class BrightnessPopup(Gtk.Window):
         self._master_group: _SliderGroup | None = None
         self._ignore_focus_loss_until = 0.0
         self._had_focus = False
+        self._programmatic_update = False
 
         self.set_decorated(False)
         self.set_resizable(False)
@@ -1230,6 +1258,22 @@ class BrightnessPopup(Gtk.Window):
 
         ct_master_cb = self._on_master_color_temp if self._on_color_temp and show_ct else None
         ct_per_mon_cb = self._on_monitor_color_temp if self._on_color_temp and show_ct else None
+
+        # Top header bar with Auto Mode toggle
+        top_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        app_title = Gtk.Label()
+        app_title.set_markup("<b>ddc-slider</b>")
+        app_title.set_xalign(0.0)
+        top_bar.pack_start(app_title, True, True, 0)
+
+        if self._on_toggle_auto and self._is_auto_enabled:
+            is_auto = self._is_auto_enabled()
+            self._auto_btn = Gtk.Button(label="⚡ Auto: ON" if is_auto else "⚡ Auto: OFF")
+            self._auto_btn.set_tooltip_text("Auto Mode is active. Click to turn OFF." if is_auto else "Auto Mode is OFF. Click to turn ON.")
+            self._auto_btn.connect("clicked", self._on_auto_clicked)
+            top_bar.pack_end(self._auto_btn, False, False, 0)
+
+        self._main_box.pack_start(top_bar, False, False, 2)
 
         if multi:
             master_frame = Gtk.Frame()
@@ -1335,7 +1379,7 @@ class BrightnessPopup(Gtk.Window):
         self.move(px, py)
 
     def rebuild_monitors(self, new_monitors: list[MonitorInfo]):
-        was_visible = self.get_visible() or self._visible
+        was_visible = self._visible
         should_open = bool(self.config.get("open_on_hotplug", False))
         self.monitors = new_monitors
         for child in self._main_box.get_children():
@@ -1362,6 +1406,8 @@ class BrightnessPopup(Gtk.Window):
             self.hide()
 
     def _notify_changed(self):
+        if getattr(self, "_programmatic_update", False):
+            return
         if self._on_value_changed:
             self._on_value_changed()
 
@@ -1443,18 +1489,21 @@ class BrightnessPopup(Gtk.Window):
         threading.Thread(target=_do_refresh, daemon=True).start()
 
     def _apply_hw_results(self, results: dict):
-        for group in self._monitor_groups:
-            vals = results.get(group.monitor.bus)
-            if vals:
-                b, c = vals
-                if b is not None:
-                    group.set_brightness(b)
-                    group.monitor.current_brightness = b
-                if c is not None and group.contrast_scale:
-                    group.set_contrast(c)
-                    group.monitor.current_contrast = c
-        self._sync_master()
-        self._notify_changed()
+        self._programmatic_update = True
+        try:
+            for group in self._monitor_groups:
+                vals = results.get(group.monitor.bus)
+                if vals:
+                    b, c = vals
+                    if b is not None:
+                        group.set_brightness(b)
+                        group.monitor.current_brightness = b
+                    if c is not None and group.contrast_scale:
+                        group.set_contrast(c)
+                        group.monitor.current_contrast = c
+            self._sync_master()
+        finally:
+            self._programmatic_update = False
         return False
 
     def _sync_master(self):
@@ -1473,57 +1522,81 @@ class BrightnessPopup(Gtk.Window):
                     self._master_group.set_color_temp(avg_ct)
 
     def apply_cached_values(self, cached: list[dict]):
-        cache_map = {entry["bus"]: entry for entry in cached}
-        for group in self._monitor_groups:
-            entry = cache_map.get(group.monitor.bus)
-            if entry:
-                b = entry.get("brightness", 50)
-                c = entry.get("contrast", 50)
-                t = entry.get("color_temp", COLOR_TEMP_NEUTRAL)
-                group.set_brightness(b)
-                if group.monitor is not None:
-                    group.monitor.current_brightness = b
-                    group.monitor.current_contrast = c
-                    group.monitor.current_color_temp = t
-                if group.contrast_scale:
-                    group.set_contrast(c)
-                if group.color_temp_scale:
-                    group.set_color_temp(t)
-        self._sync_master()
+        self._programmatic_update = True
+        try:
+            cache_map = {entry["bus"]: entry for entry in cached}
+            for group in self._monitor_groups:
+                entry = cache_map.get(group.monitor.bus)
+                if entry:
+                    b = entry.get("brightness", 50)
+                    c = entry.get("contrast", 50)
+                    t = entry.get("color_temp", COLOR_TEMP_NEUTRAL)
+                    group.set_brightness(b)
+                    if group.monitor is not None:
+                        group.monitor.current_brightness = b
+                        group.monitor.current_contrast = c
+                        group.monitor.current_color_temp = t
+                    if group.contrast_scale:
+                        group.set_contrast(c)
+                    if group.color_temp_scale:
+                        group.set_color_temp(t)
+            self._sync_master()
+        finally:
+            self._programmatic_update = False
 
     def update_all(self, brightness: int, contrast: int | None = None, color_temp: int | None = None):
-        for group in self._monitor_groups:
-            group.set_brightness(brightness)
-            if group.monitor is not None:
-                group.monitor.current_brightness = brightness
-                if contrast is not None:
-                    group.monitor.current_contrast = contrast
-                if color_temp is not None:
-                    group.monitor.current_color_temp = color_temp
-            if contrast is not None and group.contrast_scale:
-                group.set_contrast(contrast)
-            if color_temp is not None and group.color_temp_scale:
-                group.set_color_temp(color_temp)
-        if self._master_group:
-            self._master_group.set_brightness(brightness)
-            if contrast is not None and self._master_group.contrast_scale:
-                self._master_group.set_contrast(contrast)
-            if color_temp is not None and self._master_group.color_temp_scale:
-                self._master_group.set_color_temp(color_temp)
+        self._programmatic_update = True
+        try:
+            for group in self._monitor_groups:
+                group.set_brightness(brightness)
+                if group.monitor is not None:
+                    group.monitor.current_brightness = brightness
+                    if contrast is not None:
+                        group.monitor.current_contrast = contrast
+                    if color_temp is not None:
+                        group.monitor.current_color_temp = color_temp
+                if contrast is not None and group.contrast_scale:
+                    group.set_contrast(contrast)
+                if color_temp is not None and group.color_temp_scale:
+                    group.set_color_temp(color_temp)
+            if self._master_group:
+                self._master_group.set_brightness(brightness)
+                if contrast is not None and self._master_group.contrast_scale:
+                    self._master_group.set_contrast(contrast)
+                if color_temp is not None and self._master_group.color_temp_scale:
+                    self._master_group.set_color_temp(color_temp)
+        finally:
+            self._programmatic_update = False
 
     def update_value(self, value):
-        for group in self._monitor_groups:
-            group.set_brightness(value)
-            if group.monitor is not None:
-                group.monitor.current_brightness = value
-        if self._master_group:
-            self._master_group.set_brightness(value)
+        self._programmatic_update = True
+        try:
+            for group in self._monitor_groups:
+                group.set_brightness(value)
+                if group.monitor is not None:
+                    group.monitor.current_brightness = value
+            if self._master_group:
+                self._master_group.set_brightness(value)
+        finally:
+            self._programmatic_update = False
+
+    def _on_auto_clicked(self, btn):
+        if self._on_toggle_auto:
+            new_st = self._on_toggle_auto()
+            self.update_auto_btn_state(new_st)
+
+    def update_auto_btn_state(self, is_auto: bool):
+        if self._auto_btn:
+            self._auto_btn.set_label("⚡ Auto: ON" if is_auto else "⚡ Auto: OFF")
+            self._auto_btn.set_tooltip_text("Auto Mode is active. Click to turn OFF." if is_auto else "Auto Mode is OFF. Click to turn ON.")
 
     def hide(self):
         super().hide()
 
     def _set_visible(self, visible):
         self._visible = visible
+        if visible and self._is_auto_enabled:
+            self.update_auto_btn_state(self._is_auto_enabled())
         if not visible:
             self._had_focus = False
 
@@ -1658,15 +1731,70 @@ def get_current_period(day_time_str: str, night_time_str: str, now: datetime.dat
         return "day" if (now_m >= d_m or now_m < n_m) else "night"
 
 
+def calculate_circadian_target(stages: list[dict], now: datetime.datetime | None = None) -> tuple[int, int, int, str, str, int]:
+    """Calculates continuous interpolated (brightness, contrast, color_temp, active_stage_name, next_stage_name, minutes_to_next)
+    using smooth cosine easing between scheduled waypoints.
+    """
+    if now is None:
+        now = datetime.datetime.now()
+    m_now = now.hour * 60 + now.minute + now.second / 60.0
+
+    parsed = sorted([(parse_time_to_minutes(s["time"]), s) for s in stages], key=lambda x: x[0])
+    if not parsed:
+        return 100, 75, 6500, "Daylight ☀", "Daylight ☀", 0
+
+    times = [p[0] for p in parsed]
+    n = len(times)
+
+    if m_now < times[0]:
+        t_prev = times[-1] - 1440
+        s_prev = parsed[-1][1]
+        t_next = times[0]
+        s_next = parsed[0][1]
+    elif m_now >= times[-1]:
+        t_prev = times[-1]
+        s_prev = parsed[-1][1]
+        t_next = times[0] + 1440
+        s_next = parsed[0][1]
+    else:
+        idx = 0
+        while idx < n - 1 and not (times[idx] <= m_now < times[idx + 1]):
+            idx += 1
+        t_prev = times[idx]
+        s_prev = parsed[idx][1]
+        t_next = times[idx + 1]
+        s_next = parsed[idx + 1][1]
+
+    span = t_next - t_prev
+    prog = max(0.0, min(1.0, (m_now - t_prev) / span)) if span > 0 else 1.0
+    ease = 0.5 * (1.0 - math.cos(math.pi * prog))
+
+    br = int(round(s_prev.get("brightness", 100) + ease * (s_next.get("brightness", 100) - s_prev.get("brightness", 100))))
+    co = int(round(s_prev.get("contrast", 75) + ease * (s_next.get("contrast", 75) - s_prev.get("contrast", 75))))
+    ct_raw = s_prev.get("color_temp", 6500) + ease * (s_next.get("color_temp", 6500) - s_prev.get("color_temp", 6500))
+    ct = int(round(ct_raw / 50.0)) * 50
+
+    mins_to_next = max(0, int(round(t_next - m_now)))
+    active_stage = s_prev.get("name", "")
+    next_stage = s_next.get("name", "")
+    return br, co, ct, active_stage, next_stage, mins_to_next
+
+
 class DayNightScheduler:
-    """Manages automatic day/night mode transitions based on clock time events."""
+    """Manages automatic multi-stage circadian schedule and day/night mode transitions."""
 
     def __init__(self, app: 'TrayApp'):
         self.app = app
         self._enabled = bool(self.app.config.get("auto_schedule_enabled", True))
+        self._circadian_enabled = bool(self.app.config.get("circadian_enabled", True))
         self._current_period = None
         self._timer_id = None
         self._last_tick_time = time.time()
+        self._manual_override_until = 0.0
+        self._last_applied_br = None
+        self._last_applied_co = None
+        self._last_applied_ct = None
+        self._last_notified_stage = None
 
     def start(self):
         if self._timer_id is None:
@@ -1685,9 +1813,45 @@ class DayNightScheduler:
         self._enabled = enabled
         self.app.config["auto_schedule_enabled"] = enabled
         save_config_file(self.app.config)
-        self.app.update_tooltip()
         if enabled:
+            self._manual_override_until = 0.0
             self._check(initial=True)
+        self.app.update_tooltip()
+        self.app.refresh_tray_menu()
+
+    def is_circadian_mode(self) -> bool:
+        return self._circadian_enabled
+
+    def set_circadian_enabled(self, enabled: bool):
+        self._circadian_enabled = enabled
+        self.app.config["circadian_enabled"] = enabled
+        save_config_file(self.app.config)
+        if self._enabled:
+            self._manual_override_until = 0.0
+            self._check(initial=True)
+        self.app.update_tooltip()
+        self.app.refresh_tray_menu()
+
+    def is_manual_override_active(self) -> bool:
+        return time.time() < self._manual_override_until
+
+    def notify_manual_override(self):
+        timeout_mins = float(self.app.config.get("manual_override_timeout_min", 45))
+        self._manual_override_until = time.time() + timeout_mins * 60.0
+        print(f"[{APP_NAME}] Manual adjustment detected. Pausing auto-schedule for {int(timeout_mins)}m.", file=sys.stderr)
+        self.app.update_tooltip()
+        self.app.refresh_tray_menu()
+
+    def resume_auto_schedule(self):
+        self._manual_override_until = 0.0
+        self._last_applied_br = None
+        self._last_applied_co = None
+        self._last_applied_ct = None
+        print(f"[{APP_NAME}] Resuming auto-schedule circadian curve.", file=sys.stderr)
+        if self._enabled:
+            self._check(initial=True)
+        self.app.update_tooltip()
+        self.app.refresh_tray_menu()
 
     def get_period(self, now: datetime.datetime | None = None) -> str:
         d_t = self.app.config.get("day_time", "07:00")
@@ -1706,22 +1870,65 @@ class DayNightScheduler:
         if not self._enabled:
             return
 
-        period = self.get_period()
-        if initial:
-            # On startup or wake from suspend
-            if self._current_period != period:
-                self._current_period = period
-                print(f"[{APP_NAME}] Auto schedule initialized: currently {period.upper()} mode.", file=sys.stderr)
-                self.apply_period(period, notify=False, smooth=False)
+        if self.is_manual_override_active():
+            self.app.update_tooltip()
+            return
+
+        if self.is_circadian_mode():
+            stages = self.app.config.get("circadian_stages", DEFAULT_CIRCADIAN_STAGES)
+            br, co, ct, active_stage, next_stage, mins_to_next = calculate_circadian_target(stages)
+
+            if initial:
+                print(f"[{APP_NAME}] Circadian schedule initialized: {active_stage} ({br}%, {co}%, {ct}K).", file=sys.stderr)
+                self.apply_circadian_values(br, co, ct, active_stage, notify=False, smooth=False)
+                self._last_notified_stage = active_stage
             else:
-                self.app.update_tooltip()
+                delta_br = abs(br - (self._last_applied_br if self._last_applied_br is not None else -999))
+                delta_co = abs(co - (self._last_applied_co if self._last_applied_co is not None else -999))
+                delta_ct = abs(ct - (self._last_applied_ct if self._last_applied_ct is not None else -999))
+
+                if delta_br >= 2 or delta_ct >= 50 or delta_co >= 3:
+                    self.apply_circadian_values(br, co, ct, active_stage, notify=False, smooth=False)
+
+                if active_stage != self._last_notified_stage:
+                    self._last_notified_stage = active_stage
+                    print(f"[{APP_NAME}] ⏰ Circadian Phase Event: Entering {active_stage} ({br}% / {ct}K)", file=sys.stderr)
+                    if self.app.config.get("schedule_notifications", True):
+                        h, m = mins_to_next // 60, mins_to_next % 60
+                        rem_str = f"{h}h {m:02d}m" if h > 0 else f"{m}m"
+                        send_desktop_notification(f"DDC Slider: {active_stage}",
+                                                  f"Circadian target: {br}% brightness, {ct}K warmth. Next: {next_stage} in {rem_str}.")
+                    self.app.update_tooltip()
+                    self.app.refresh_tray_menu()
         else:
-            # Scheduled time event crossing
-            if self._current_period != period:
-                old_period = self._current_period
-                self._current_period = period
-                print(f"[{APP_NAME}] ⏰ Auto Day/Night Time Event: Switched from {old_period} to {period.upper()} mode!", file=sys.stderr)
-                self.apply_period(period, notify=True, smooth=True)
+            period = self.get_period()
+            if initial:
+                if self._current_period != period:
+                    self._current_period = period
+                    print(f"[{APP_NAME}] Auto schedule initialized: currently {period.upper()} mode.", file=sys.stderr)
+                    self.apply_period(period, notify=False, smooth=False)
+                else:
+                    self.app.update_tooltip()
+            else:
+                if self._current_period != period:
+                    old_period = self._current_period
+                    self._current_period = period
+                    print(f"[{APP_NAME}] ⏰ Auto Day/Night Time Event: Switched from {old_period} to {period.upper()} mode!", file=sys.stderr)
+                    self.apply_period(period, notify=True, smooth=True)
+
+    def apply_circadian_values(self, br: int, co: int, ct: int, active_stage: str, notify: bool = False, smooth: bool = False):
+        self._last_applied_br = br
+        self._last_applied_co = co
+        self._last_applied_ct = ct
+        self.app._night_mode_active = (ct < 4000 or br < 50)
+
+        if smooth and self.app.config.get("smooth_transition", True):
+            self.app.smooth_transition_to(br, co, ct)
+        else:
+            self.app.apply_preset_values_instant(br, co, ct)
+
+        self.app.update_tooltip()
+        self.app.refresh_tray_menu()
 
     def apply_period(self, period: str, notify: bool = True, smooth: bool = True):
         if period == "day":
@@ -1738,6 +1945,9 @@ class DayNightScheduler:
             icon_name = "weather-clear-night"
 
         self.app._night_mode_active = (period == "night")
+        self._last_applied_br = br
+        self._last_applied_co = co
+        self._last_applied_ct = ct
 
         if smooth and self.app.config.get("smooth_transition", True):
             self.app.smooth_transition_to(br, co, ct)
@@ -1776,7 +1986,7 @@ class TrayApp:
         self.popup = BrightnessPopup(monitors, min_val, max_val, step,
                                      on_color_temp=self._on_color_temp,
                                      on_contrast=self._on_contrast,
-                                     on_value_changed=self._save_current_state,
+                                     on_value_changed=self._on_user_value_changed,
                                      config=self.config)
         self._cached_brightness = None
         self._scroll_debounce_id = None
@@ -1820,16 +2030,46 @@ class TrayApp:
         # Start single-instance IPC socket server
         self._setup_ipc_server()
 
-        # Automatic Day/Night Mode Scheduler
+        # Automatic Day/Night & Circadian Mode Scheduler
         self.scheduler = DayNightScheduler(self)
         self.scheduler.start()
+
+        # Connect popup auto toggle button to scheduler
+        self.popup._on_toggle_auto = self._toggle_auto_schedule_from_popup
+        self.popup._is_auto_enabled = self.scheduler.is_enabled
+        self.popup.update_auto_btn_state(self.scheduler.is_enabled())
+
+    def _toggle_auto_schedule_from_popup(self) -> bool:
+        new_st = not self.scheduler.is_enabled()
+        self.scheduler.set_enabled(new_st)
+        self.refresh_tray_menu()
+        return new_st
+
+    def _on_user_value_changed(self):
+        self._save_current_state()
+        if hasattr(self, "scheduler"):
+            self.scheduler.notify_manual_override()
+
+    def refresh_tray_menu(self):
+        if self.indicator:
+            self.indicator.set_menu(self._build_menu())
 
     def update_tooltip(self):
         n = len(self.monitors)
         base = _("tooltip_multi", n=n) if n > 1 else _("tooltip")
         if hasattr(self, "scheduler") and self.scheduler.is_enabled():
-            p = self.scheduler.get_period()
-            tag = "  [Auto: 🌙 Night]" if p == "night" else "  [Auto: ☀ Day]"
+            if self.scheduler.is_manual_override_active():
+                rem_mins = int((self.scheduler._manual_override_until - time.time()) // 60) + 1
+                tag = f"  [Auto: ⏸ Paused ({rem_mins}m)]"
+            elif self.scheduler.is_circadian_mode():
+                stages = self.config.get("circadian_stages", DEFAULT_CIRCADIAN_STAGES)
+                br, co, ct, active, next_s, rem = calculate_circadian_target(stages)
+                h, m = rem // 60, rem % 60
+                rem_str = f"{h}h {m:02d}m" if h > 0 else f"{m}m"
+                tag = f"  [{active} ({br}%, {ct}K) → {next_s} in {rem_str}]"
+            else:
+                p = self.scheduler.get_period()
+                tag = "  [Auto: 🌙 Night]" if p == "night" else "  [Auto: ☀ Day]"
             tooltip = base + tag
         else:
             tooltip = base
@@ -1863,6 +2103,7 @@ class TrayApp:
                     return
                 progress = step / steps
                 ease = 0.5 * (1.0 - math.cos(math.pi * progress))
+                is_last_step = (step == steps)
 
                 for m, b0, c0, t0 in start_states:
                     cb = int(round(b0 + ease * (target_br - b0)))
@@ -1870,10 +2111,15 @@ class TrayApp:
                     ct = int(round((t0 + ease * (target_ct - t0)) / 50.0)) * 50
 
                     m.current_brightness = cb
-                    m.current_contrast = cc
                     m.current_color_temp = ct
                     m.brightness.set_value(cb)
-                    TrayApp.apply_display_color_contrast(m, contrast=cc, color_temp=ct)
+
+                    # Only update hardware contrast on external DDC displays at the final step to avoid bus jamming
+                    if is_last_step:
+                        m.current_contrast = cc
+                        TrayApp.apply_display_color_contrast(m, contrast=cc, color_temp=ct)
+                    else:
+                        TrayApp.apply_display_color_contrast(m, color_temp=ct)
 
                 curr_br = int(round(start_states[0][1] + ease * (target_br - start_states[0][1])))
                 curr_co = int(round(start_states[0][2] + ease * (target_co - start_states[0][2])))
@@ -1902,10 +2148,36 @@ class TrayApp:
         threading.Thread(target=_do, daemon=True).start()
 
     def _switch_to_day(self):
-        self.scheduler.apply_period("day", notify=True, smooth=True)
+        d_br = int(self.config.get("day_mode_brightness", 100))
+        d_co = int(self.config.get("day_mode_contrast", 75))
+        d_ct = int(self.config.get("day_mode_temp", 6500))
+        self.popup.update_all(brightness=d_br, contrast=d_co, color_temp=d_ct)
+        def _do():
+            for m in self.monitors:
+                m.current_brightness = d_br
+                m.brightness.set_value(d_br)
+                TrayApp.apply_display_color_contrast(m, contrast=d_co, color_temp=d_ct)
+            self._save_current_state()
+        threading.Thread(target=_do, daemon=True).start()
+        self._night_mode_active = False
+        if hasattr(self, "scheduler"):
+            self.scheduler.notify_manual_override()
 
     def _switch_to_night(self):
-        self.scheduler.apply_period("night", notify=True, smooth=True)
+        n_br = int(self.config.get("night_mode_brightness", 35))
+        n_co = int(self.config.get("night_mode_contrast", 50))
+        n_ct = int(self.config.get("night_mode_temp", 2700))
+        self.popup.update_all(brightness=n_br, contrast=n_co, color_temp=n_ct)
+        def _do():
+            for m in self.monitors:
+                m.current_brightness = n_br
+                m.brightness.set_value(n_br)
+                TrayApp.apply_display_color_contrast(m, contrast=n_co, color_temp=n_ct)
+            self._save_current_state()
+        threading.Thread(target=_do, daemon=True).start()
+        self._night_mode_active = True
+        if hasattr(self, "scheduler"):
+            self.scheduler.notify_manual_override()
 
     def _toggle_auto_schedule(self):
         new_val = not self.scheduler.is_enabled()
@@ -1914,12 +2186,57 @@ class TrayApp:
     def _on_toggle_auto_schedule(self, widget):
         enabled = widget.get_active()
         self.scheduler.set_enabled(enabled)
+        if hasattr(self, "popup") and self.popup:
+            self.popup.update_auto_btn_state(enabled)
         status_msg = "Enabled" if enabled else "Disabled"
-        print(f"[{APP_NAME}] Auto Day/Night schedule {status_msg.lower()}.", file=sys.stderr)
-        d_t = self.config.get("day_time", "07:00")
-        n_t = self.config.get("night_time", "19:00")
-        msg = f"Schedule: Day at {d_t}, Night at {n_t}" if enabled else "Manual mode active"
-        send_desktop_notification(f"Auto Schedule: {status_msg}", msg)
+        if self.scheduler.is_circadian_mode():
+            stages = self.config.get("circadian_stages", DEFAULT_CIRCADIAN_STAGES)
+            br, co, ct, active, next_s, rem = calculate_circadian_target(stages)
+            print(f"[{APP_NAME}] Circadian schedule {status_msg.lower()} (currently {active}).", file=sys.stderr)
+            msg = f"Circadian curve active ({active}, target {br}%, {ct}K)" if enabled else "Manual mode active"
+            send_desktop_notification(f"Circadian Schedule: {status_msg}", msg)
+        else:
+            print(f"[{APP_NAME}] Auto Day/Night schedule {status_msg.lower()}.", file=sys.stderr)
+            d_t = self.config.get("day_time", "07:00")
+            n_t = self.config.get("night_time", "19:00")
+            msg = f"Schedule: Day at {d_t}, Night at {n_t}" if enabled else "Manual mode active"
+            send_desktop_notification(f"Auto Schedule: {status_msg}", msg)
+
+    def _apply_ipc_brightness(self, value: int, output: str | None = None):
+        targets = [m for m in self.monitors if not output or (m.output_name and m.output_name.lower() == output.lower())]
+        if not targets:
+            targets = self.monitors
+        for m in targets:
+            m.current_brightness = value
+            m.brightness.set_value(value)
+        self.popup.update_value(value)
+        self._save_current_state()
+        if hasattr(self, "scheduler"):
+            self.scheduler.notify_manual_override()
+
+    def _apply_ipc_contrast(self, value: int, output: str | None = None):
+        targets = [m for m in self.monitors if not output or (m.output_name and m.output_name.lower() == output.lower())]
+        if not targets:
+            targets = self.monitors
+        for m in targets:
+            m.current_contrast = value
+            TrayApp.apply_display_color_contrast(m, contrast=value)
+        self.popup.update_all(brightness=self.monitors[0].current_brightness, contrast=value)
+        self._save_current_state()
+        if hasattr(self, "scheduler"):
+            self.scheduler.notify_manual_override()
+
+    def _apply_ipc_temp(self, value: int, output: str | None = None):
+        targets = [m for m in self.monitors if not output or (m.output_name and m.output_name.lower() == output.lower())]
+        if not targets:
+            targets = self.monitors
+        for m in targets:
+            m.current_color_temp = value
+            TrayApp.apply_display_color_contrast(m, color_temp=value)
+        self.popup.update_all(brightness=self.monitors[0].current_brightness, color_temp=value)
+        self._save_current_state()
+        if hasattr(self, "scheduler"):
+            self.scheduler.notify_manual_override()
 
     def _setup_ipc_server(self):
         sock_path = get_socket_path()
@@ -1949,20 +2266,44 @@ class TrayApp:
                         conn, _ = self._ipc_server.accept()
                         data = conn.recv(1024).strip()
                         conn.close()
-                        if data in (b"toggle", b"show"):
+                        cmd = data.decode("utf-8", errors="ignore").strip()
+                        if cmd in ("toggle", "show"):
                             GLib.idle_add(self._on_remote_toggle)
-                        elif data == b"day":
+                        elif cmd == "day":
                             GLib.idle_add(self._switch_to_day)
-                        elif data == b"night":
+                        elif cmd == "night":
                             GLib.idle_add(self._switch_to_night)
-                        elif data == b"toggle_night":
+                        elif cmd == "toggle_night":
                             GLib.idle_add(lambda: self._on_toggle_night_mode(None))
-                        elif data == b"auto_toggle":
+                        elif cmd == "reset":
+                            GLib.idle_add(self._reset_all_displays)
+                        elif cmd == "auto_toggle":
                             GLib.idle_add(self._toggle_auto_schedule)
-                        elif data == b"auto_on":
+                        elif cmd == "auto_on":
                             GLib.idle_add(lambda: self.scheduler.set_enabled(True))
-                        elif data == b"auto_off":
+                        elif cmd == "auto_off":
                             GLib.idle_add(lambda: self.scheduler.set_enabled(False))
+                        elif cmd == "circadian_resume":
+                            GLib.idle_add(self.scheduler.resume_auto_schedule)
+                        elif cmd == "circadian_on":
+                            GLib.idle_add(lambda: self.scheduler.set_circadian_enabled(True))
+                        elif cmd == "circadian_off":
+                            GLib.idle_add(lambda: self.scheduler.set_circadian_enabled(False))
+                        elif cmd.startswith("set_brightness:"):
+                            parts = cmd.split(":")
+                            out_target = parts[1] if len(parts) > 2 and parts[1] else None
+                            val = int(parts[-1])
+                            GLib.idle_add(self._apply_ipc_brightness, val, out_target)
+                        elif cmd.startswith("set_contrast:"):
+                            parts = cmd.split(":")
+                            out_target = parts[1] if len(parts) > 2 and parts[1] else None
+                            val = int(parts[-1])
+                            GLib.idle_add(self._apply_ipc_contrast, val, out_target)
+                        elif cmd.startswith("set_temp:"):
+                            parts = cmd.split(":")
+                            out_target = parts[1] if len(parts) > 2 and parts[1] else None
+                            val = int(parts[-1])
+                            GLib.idle_add(self._apply_ipc_temp, val, out_target)
                     except Exception:
                         break
             threading.Thread(target=_listener, daemon=True).start()
@@ -1998,10 +2339,12 @@ class TrayApp:
 
     def _apply_monitors_update(self, new_monitors: list[MonitorInfo]):
         """Apply newly probed monitors to popup, tooltip, and menus in main thread."""
+        if not new_monitors:
+            print(f"[{APP_NAME}] No monitors detected during probe.", file=sys.stderr)
+            return False
         self.monitors = new_monitors
         self.update_tooltip()
-        if self.indicator:
-            self.indicator.set_menu(self._build_menu())
+        self.refresh_tray_menu()
         self.popup.rebuild_monitors(new_monitors)
         self._save_current_state()
 
@@ -2012,18 +2355,14 @@ class TrayApp:
         return False
 
     def _save_current_state(self):
-        values = {}
-        for group in self.popup._monitor_groups:
-            mon = group.monitor
-            if mon is None:
-                continue
-            entry = {
-                "brightness": int(group.brightness_scale.get_value()),
-                "contrast": int(group.contrast_scale.get_value()) if group.contrast_scale else 50,
+        values = {
+            m.bus: {
+                "brightness": m.current_brightness,
+                "contrast": m.current_contrast,
+                "color_temp": m.current_color_temp,
             }
-            if group.color_temp_scale is not None:
-                entry["color_temp"] = int(group.color_temp_scale.get_value())
-            values[mon.bus] = entry
+            for m in self.monitors
+        }
         save_state(self.monitors, values)
 
     def _restore_color_temps(self, cached_state: list[dict]):
@@ -2092,16 +2431,20 @@ class TrayApp:
                                      color_temp: int | None = None) -> bool:
         """Atomically and independently apply contrast and color temperature for this specific monitor.
         Uses xrandr --output <output_name> to ensure strict per-display isolation."""
+        contrast_changed = False
         if contrast is not None:
-            monitor.current_contrast = max(0, min(100, int(contrast)))
+            contrast_val = max(0, min(100, int(contrast)))
+            if monitor.current_contrast != contrast_val:
+                monitor.current_contrast = contrast_val
+                contrast_changed = True
         if color_temp is not None:
             monitor.current_color_temp = max(COLOR_TEMP_MIN, min(COLOR_TEMP_MAX, int(color_temp)))
 
         c = monitor.current_contrast
         t = monitor.current_color_temp
 
-        # 1. Hardware contrast for external DDC/CI monitor
-        if not monitor.is_internal and isinstance(monitor.contrast, DDCController):
+        # 1. Hardware contrast for external DDC/CI monitor (ONLY if contrast was explicitly requested and changed)
+        if contrast_changed and not monitor.is_internal and isinstance(monitor.contrast, DDCController):
             try:
                 monitor.contrast.set_value(c)
             except Exception as e:
@@ -2152,9 +2495,12 @@ class TrayApp:
             self.popup._master_group.set_color_temp(temp)
         def _do():
             for m in self.monitors:
+                m.current_color_temp = temp
                 TrayApp.apply_display_color_contrast(m, color_temp=temp)
             self._save_current_state()
         threading.Thread(target=_do, daemon=True).start()
+        if hasattr(self, "scheduler"):
+            self.scheduler.notify_manual_override()
 
     def _on_apply_preset(self, widget, preset_index):
         if 0 <= preset_index < len(self.presets):
@@ -2170,6 +2516,8 @@ class TrayApp:
                     TrayApp.apply_display_color_contrast(m, contrast=co, color_temp=ct)
                 self._save_current_state()
             threading.Thread(target=_do, daemon=True).start()
+            if hasattr(self, "scheduler"):
+                self.scheduler.notify_manual_override()
 
     def _on_toggle_night_mode(self, widget):
         self._night_mode_active = not self._night_mode_active
@@ -2180,23 +2528,43 @@ class TrayApp:
             ]
             nm_temp = self.config.get("night_mode_temp", 2700)
             nm_br = self.config.get("night_mode_brightness", 35)
-            self.popup.update_all(brightness=nm_br, color_temp=nm_temp)
+            nm_co = self.config.get("night_mode_contrast", 50)
+            self.popup.update_all(brightness=nm_br, contrast=nm_co, color_temp=nm_temp)
             def _do():
                 for m in self.monitors:
                     m.brightness.set_value(nm_br)
                     m.current_brightness = nm_br
-                    TrayApp.apply_display_color_contrast(m, color_temp=nm_temp)
+                    TrayApp.apply_display_color_contrast(m, contrast=nm_co, color_temp=nm_temp)
                 self._save_current_state()
             threading.Thread(target=_do, daemon=True).start()
         else:
             if self._saved_daylight_state:
+                d_br = self._saved_daylight_state[0][1]
+                d_co = self._saved_daylight_state[0][2]
+                d_ct = self._saved_daylight_state[0][3]
+                saved = self._saved_daylight_state
+                self.popup.update_all(brightness=d_br, contrast=d_co, color_temp=d_ct)
                 def _do():
-                    for mon, br, co, ct in self._saved_daylight_state:
+                    for mon, br, co, ct in saved:
                         mon.brightness.set_value(br)
                         mon.current_brightness = br
                         TrayApp.apply_display_color_contrast(mon, contrast=co, color_temp=ct)
                     self._save_current_state()
                 threading.Thread(target=_do, daemon=True).start()
+            else:
+                d_br = int(self.config.get("day_mode_brightness", 100))
+                d_co = int(self.config.get("day_mode_contrast", 75))
+                d_ct = int(self.config.get("day_mode_temp", 6500))
+                self.popup.update_all(brightness=d_br, contrast=d_co, color_temp=d_ct)
+                def _do():
+                    for m in self.monitors:
+                        m.current_brightness = d_br
+                        m.brightness.set_value(d_br)
+                        TrayApp.apply_display_color_contrast(m, contrast=d_co, color_temp=d_ct)
+                    self._save_current_state()
+                threading.Thread(target=_do, daemon=True).start()
+        if hasattr(self, "scheduler"):
+            self.scheduler.notify_manual_override()
 
     def _dim_monitor(self, target_mon: MonitorInfo):
         def _do():
@@ -2205,6 +2573,8 @@ class TrayApp:
             self._save_current_state()
             GLib.idle_add(self.popup.refresh_value)
         threading.Thread(target=_do, daemon=True).start()
+        if hasattr(self, "scheduler"):
+            self.scheduler.notify_manual_override()
 
     def _reset_all_displays(self):
         self.popup.update_all(brightness=100, contrast=75, color_temp=COLOR_TEMP_NEUTRAL)
@@ -2212,13 +2582,16 @@ class TrayApp:
             for m in self.monitors:
                 m.brightness.set_value(100)
                 m.current_brightness = 100
-                if m.contrast:
-                    m.contrast.set_value(75)
-                m.current_contrast = 75
+                co_val = 50 if m.is_internal else 75
+                m.current_contrast = co_val
                 m.current_color_temp = COLOR_TEMP_NEUTRAL
-                TrayApp.apply_display_color_contrast(m, contrast=75, color_temp=COLOR_TEMP_NEUTRAL)
+                if m.contrast:
+                    m.contrast.set_value(co_val)
+                TrayApp.apply_display_color_contrast(m, contrast=co_val, color_temp=COLOR_TEMP_NEUTRAL)
             self._save_current_state()
         threading.Thread(target=_do, daemon=True).start()
+        if hasattr(self, "scheduler"):
+            self.scheduler.notify_manual_override()
 
     def _on_edit_config(self, widget):
         config_path = DEFAULT_CONFIG_PATH
@@ -2243,16 +2616,66 @@ class TrayApp:
         item_nm.connect("activate", self._on_toggle_night_mode)
         menu.append(item_nm)
 
-        # 1b. Auto Day/Night Schedule Toggle
+        # 1b. Auto Day/Night / Circadian Schedule Toggle
         sched_on = self.scheduler.is_enabled()
-        d_t = self.config.get("day_time", "07:00")
-        n_t = self.config.get("night_time", "19:00")
-        curr_p = self.scheduler.get_period()
-        tag = " [☀ Day]" if curr_p == "day" else " [🌙 Night]"
-        item_auto = Gtk.CheckMenuItem(label=f"⏰ Auto Schedule ({d_t} – {n_t}){tag}")
+        is_circadian = self.scheduler.is_circadian_mode()
+
+        if is_circadian:
+            stages = self.config.get("circadian_stages", DEFAULT_CIRCADIAN_STAGES)
+            br, co, ct, active, next_s, rem = calculate_circadian_target(stages)
+            item_auto = Gtk.CheckMenuItem(label=f"⏰ Circadian Schedule  [{active}]")
+        else:
+            d_t = self.config.get("day_time", "07:00")
+            n_t = self.config.get("night_time", "19:00")
+            curr_p = self.scheduler.get_period()
+            tag = " [☀ Day]" if curr_p == "day" else " [🌙 Night]"
+            item_auto = Gtk.CheckMenuItem(label=f"⏰ Auto Schedule ({d_t} – {n_t}){tag}")
+
         item_auto.set_active(sched_on)
         item_auto.connect("toggled", self._on_toggle_auto_schedule)
         menu.append(item_auto)
+
+        # 1c. Resume button if manual override is active
+        if sched_on and self.scheduler.is_manual_override_active():
+            rem_override = max(1, int((self.scheduler._manual_override_until - time.time()) // 60))
+            item_resume = Gtk.MenuItem(label=f"▶ Resume Circadian Curve (paused {rem_override}m)")
+            item_resume.connect("activate", lambda w: self.scheduler.resume_auto_schedule())
+            menu.append(item_resume)
+
+        # 1d. Circadian Waypoints Submenu
+        if sched_on and is_circadian:
+            stages = self.config.get("circadian_stages", DEFAULT_CIRCADIAN_STAGES)
+            br, co, ct, active, next_s, rem = calculate_circadian_target(stages)
+            h, m = rem // 60, rem % 60
+            rem_str = f"{h}h {m:02d}m" if h > 0 else f"{m}m"
+
+            c_menu = Gtk.Menu()
+            c_header = Gtk.MenuItem(label=f"Phase: {active} ({br}%, {ct}K)")
+            c_header.set_sensitive(False)
+            c_menu.append(c_header)
+
+            c_next = Gtk.MenuItem(label=f"Next: {next_s} in {rem_str}")
+            c_next.set_sensitive(False)
+            c_menu.append(c_next)
+            c_menu.append(Gtk.SeparatorMenuItem())
+
+            for s in stages:
+                s_name = s.get("name", "Stage")
+                s_time = s.get("time", "00:00")
+                s_br = s.get("brightness", 50)
+                s_ct = s.get("color_temp", 5000)
+                stage_item = Gtk.MenuItem(label=f"{s_name}: {s_time}  (☀{s_br}% 🌡{s_ct}K)")
+                def _apply_stage_preview(w, sb=s_br, sc=s.get("contrast", 50), st=s_ct):
+                    self.smooth_transition_to(sb, sc, st)
+                    if hasattr(self, "scheduler"):
+                        self.scheduler.notify_manual_override()
+                stage_item.connect("activate", _apply_stage_preview)
+                c_menu.append(stage_item)
+
+            c_item = Gtk.MenuItem(label=f"  • Circadian Waypoints ({active} → {next_s} in {rem_str})")
+            c_item.set_submenu(c_menu)
+            menu.append(c_item)
+
         menu.append(Gtk.SeparatorMenuItem())
 
         # 2. Presets submenu
@@ -2357,8 +2780,16 @@ class TrayApp:
             pass
 
     def _on_refresh_monitors(self, widget):
-        print(f"[{APP_NAME}] Refreshing monitors...", file=sys.stderr)
-        self._on_hotplug_detected()
+        print(f"[{APP_NAME}] Refreshing displays from hardware...", file=sys.stderr)
+        def _bg():
+            new_monitors = probe_all_monitors(
+                vcp_brightness=VCP_BRIGHTNESS,
+                vcp_contrast=VCP_CONTRAST,
+                include_internal=self.config.get("include_internal_display", True),
+                cached_state=None
+            )
+            GLib.idle_add(self._apply_monitors_update, new_monitors)
+        threading.Thread(target=_bg, daemon=True).start()
 
     def _setup_appindicator(self, AppIndicatorLib, tooltip: str):
         theme = Gtk.IconTheme.get_default()
@@ -2397,15 +2828,12 @@ class TrayApp:
         if not self.monitors:
             return
         if self._cached_brightness is None:
-            self._cached_brightness = self.monitors[0].brightness.get_value()
-            if self._cached_brightness is None:
-                self._cached_brightness = self.monitors[0].current_brightness
+            self._cached_brightness = self.monitors[0].current_brightness or 50
         new_val = max(self.min_val, min(self.max_val, self._cached_brightness + delta))
         if new_val == self._cached_brightness:
             return
         self._cached_brightness = new_val
-        if self.popup._visible:
-            self.popup.update_value(new_val)
+        self.popup.update_value(new_val)
         if self._scroll_debounce_id:
             GLib.source_remove(self._scroll_debounce_id)
         self._scroll_debounce_id = GLib.timeout_add(100, self._apply_scroll_brightness, new_val)
@@ -2416,7 +2844,9 @@ class TrayApp:
             for mon in self.monitors:
                 mon.current_brightness = value
                 mon.brightness.set_value(value)
-            GLib.idle_add(self._save_current_state)
+            self._save_current_state()
+            if hasattr(self, "scheduler"):
+                GLib.idle_add(self.scheduler.notify_manual_override)
         threading.Thread(target=_set_all, daemon=True).start()
         return False
 
@@ -2658,18 +3088,14 @@ class StandaloneWindow(Gtk.Window):
         self._save_current_state()
 
     def _save_current_state(self):
-        values = {}
-        for group in self._monitor_groups:
-            mon = group.monitor
-            if mon is None:
-                continue
-            entry = {
-                "brightness": int(group.brightness_scale.get_value()),
-                "contrast": int(group.contrast_scale.get_value()) if group.contrast_scale else 50,
+        values = {
+            m.bus: {
+                "brightness": m.current_brightness,
+                "contrast": m.current_contrast,
+                "color_temp": m.current_color_temp,
             }
-            if group.color_temp_scale is not None:
-                entry["color_temp"] = int(group.color_temp_scale.get_value())
-            values[mon.bus] = entry
+            for m in self.monitors
+        }
         save_state(self.monitors, values)
 
 
@@ -2732,6 +3158,8 @@ State:  {DEFAULT_STATE_PATH}
                         help="Switch all displays to Night Mode (2700K, 35%% brightness) and exit")
     parser.add_argument("--auto-schedule", choices=["on", "off", "status"], nargs="?", const="status",
                         help="Query or configure automatic Day/Night schedule ('on', 'off', or 'status') and exit")
+    parser.add_argument("--circadian", choices=["on", "off", "status", "resume"], nargs="?", const="status",
+                        help="Query or control multi-stage circadian schedule ('status', 'resume', 'on', 'off') and exit")
     parser.add_argument("--reset", action="store_true",
                         help="Reset all screens to neutral (100%% brightness, 6500K) and exit")
     parser.add_argument("--no-internal", action="store_true",
@@ -2752,7 +3180,8 @@ State:  {DEFAULT_STATE_PATH}
         args.list, args.get, args.get_contrast,
         args.set is not None, args.set_contrast is not None,
         args.temp is not None, args.toggle_night, args.reset,
-        args.day, args.night, args.auto_schedule is not None
+        args.day, args.night, args.auto_schedule is not None,
+        args.circadian is not None
     ])
 
     # If running GUI mode and already running, send IPC message to toggle popup and exit
@@ -2840,35 +3269,54 @@ State:  {DEFAULT_STATE_PATH}
         sys.exit(0)
 
     if args.set is not None:
+        target_str = args.output or ""
+        if send_ipc_message(f"set_brightness:{target_str}:{args.set}\n".encode()):
+            print(f"[{APP_NAME}] Brightness set to {args.set}% on running instance.")
+            sys.exit(0)
         for m in target_monitors:
             m.brightness.set_value(args.set)
             m.current_brightness = args.set
         save_state(monitors, {m.bus: {"brightness": m.current_brightness, "contrast": m.current_contrast, "color_temp": m.current_color_temp} for m in monitors})
+        print(f"[{APP_NAME}] Brightness set to {args.set}%.")
         sys.exit(0)
 
     if args.set_contrast is not None:
+        target_str = args.output or ""
+        if send_ipc_message(f"set_contrast:{target_str}:{args.set_contrast}\n".encode()):
+            print(f"[{APP_NAME}] Contrast set to {args.set_contrast}% on running instance.")
+            sys.exit(0)
         for m in target_monitors:
             TrayApp.apply_display_color_contrast(m, contrast=args.set_contrast)
         save_state(monitors, {m.bus: {"brightness": m.current_brightness, "contrast": args.set_contrast, "color_temp": m.current_color_temp} for m in monitors})
+        print(f"[{APP_NAME}] Contrast set to {args.set_contrast}%.")
         sys.exit(0)
 
     if args.temp is not None:
+        target_str = args.output or ""
+        if send_ipc_message(f"set_temp:{target_str}:{args.temp}\n".encode()):
+            print(f"[{APP_NAME}] Color temperature set to {args.temp}K on running instance.")
+            sys.exit(0)
         for m in target_monitors:
             TrayApp.apply_display_color_contrast(m, color_temp=args.temp)
         save_state(monitors, {m.bus: {"brightness": m.current_brightness, "contrast": m.current_contrast, "color_temp": args.temp} for m in monitors})
+        print(f"[{APP_NAME}] Color temperature set to {args.temp}K.")
         sys.exit(0)
 
     if args.reset:
+        if send_ipc_message(b"reset\n"):
+            print(f"[{APP_NAME}] Reset all displays to neutral on running instance.")
+            sys.exit(0)
         for m in monitors:
             m.brightness.set_value(100)
             m.current_brightness = 100
-            if m.contrast:
-                m.contrast.set_value(75)
-            m.current_contrast = 75
+            co_val = 50 if m.is_internal else 75
+            m.current_contrast = co_val
             m.current_color_temp = COLOR_TEMP_NEUTRAL
-            TrayApp.apply_display_color_contrast(m, contrast=75, color_temp=COLOR_TEMP_NEUTRAL)
-        save_state(monitors, {m.bus: {"brightness": 100, "contrast": 75, "color_temp": COLOR_TEMP_NEUTRAL} for m in monitors})
-        print(f"[{APP_NAME}] All displays reset to 100%% brightness, 75%% contrast, 6500K neutral.")
+            if m.contrast:
+                m.contrast.set_value(co_val)
+            TrayApp.apply_display_color_contrast(m, contrast=co_val, color_temp=COLOR_TEMP_NEUTRAL)
+        save_state(monitors, {m.bus: {"brightness": 100, "contrast": m.current_contrast, "color_temp": COLOR_TEMP_NEUTRAL} for m in monitors})
+        print(f"[{APP_NAME}] All displays reset to 100% brightness, neutral contrast, 6500K.")
         sys.exit(0)
 
     if args.day:
@@ -2923,6 +3371,41 @@ State:  {DEFAULT_STATE_PATH}
             config["auto_schedule_enabled"] = False
             save_config_file(config)
             print(f"[{APP_NAME}] Auto Day/Night schedule disabled.")
+            sys.exit(0)
+
+    if args.circadian is not None:
+        stages = config.get("circadian_stages", DEFAULT_CIRCADIAN_STAGES)
+        if args.circadian == "status":
+            enabled = config.get("auto_schedule_enabled", True) and config.get("circadian_enabled", True)
+            br, co, ct, active, next_s, rem = calculate_circadian_target(stages)
+            h, m = rem // 60, rem % 60
+            rem_str = f"{h}h {m:02d}m" if h > 0 else f"{m}m"
+            print(f"Circadian Auto Schedule: {'ENABLED' if enabled else 'DISABLED'}")
+            print(f"  Current Phase:  {active} (Target: {br}% brightness, {co}% contrast, {ct}K)")
+            print(f"  Next Waypoint:  {next_s} in {rem_str}")
+            print("  Circadian Curve Waypoints:")
+            for s in stages:
+                print(f"    • {s['name']:<14} at {s['time']} -> {s['brightness']}% br, {s['contrast']}% co, {s['color_temp']}K")
+            sys.exit(0)
+        elif args.circadian == "resume":
+            if send_ipc_message(b"circadian_resume\n"):
+                print(f"[{APP_NAME}] Resumed circadian curve on running instance.")
+                sys.exit(0)
+            else:
+                print(f"[{APP_NAME}] ddc-slider daemon is not running.")
+                sys.exit(1)
+        elif args.circadian == "on":
+            send_ipc_message(b"circadian_on\n")
+            config["auto_schedule_enabled"] = True
+            config["circadian_enabled"] = True
+            save_config_file(config)
+            print(f"[{APP_NAME}] Circadian auto schedule enabled.")
+            sys.exit(0)
+        elif args.circadian == "off":
+            send_ipc_message(b"circadian_off\n")
+            config["circadian_enabled"] = False
+            save_config_file(config)
+            print(f"[{APP_NAME}] Circadian auto schedule disabled (fallback to 2-stage day/night).")
             sys.exit(0)
 
     if args.toggle_night:

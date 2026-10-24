@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lumatray"
+version = "3.0.0"
+description = "Next-Generation GTK3 Monitor Control Suite for Linux (Hardware DDC/CI, Color Management, Smart Automation)"
+readme = "README.md"
+authors = [{ name = "Nandha" }]
+license = { text = "MIT" }
+requires-python = ">=3.9"
+dependencies = [
+    "pygobject",
+]
+
+[project.scripts]
+lumatray = "lumatray.__main__:main"
+ddc-slider = "lumatray.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

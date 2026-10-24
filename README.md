@@ -1,324 +1,158 @@
-> **This repository has moved to Codeberg: https://codeberg.org/linux-bird/ddc-slider**
-> It is archived here. Please use Codeberg for issues and pull requests.
+# LumaTray — Next-Generation GTK3 Monitor Control Suite
 
-# ddc-slider 
+**LumaTray** is a modular monitor-control platform for Linux (optimized for Arch Linux, XFCE/X11, with Wayland readiness), featuring hardware DDC/CI control, sysfs backlight management, color temperature coordination, smart circadian automation, multi-monitor scene profiles, hotkeys, system diagnostics, and scripting integration.
 
-> Disclaimer: I changed the name to `ddc-slider` 
-> because the script uses `ddcutil` backend instead of `ddccontrol` _(not maintained anymore)_.
+---
 
-GTK3 system tray applet that controls external monitor brightness and contrast via [DDC/CI](https://en.wikipedia.org/wiki/Display_Data_Channel) protocol.
+## 🚀 Key Highlights & Architecture
 
-Works with any desktop environment or window manager that has a system tray (tint2, xfce4-panel, polybar, etc).
+LumaTray evolves beyond simple tray sliders into a robust, decoupled display control platform:
 
-![window](images/window.jpg)
+- **Core Application Shell**: Multi-backend System Tray (`AppIndicator3` / `Gtk.StatusIcon`), Quick Floating Control Panel, Translucent OSD, and a 5-destination Suite Window.
+- **Hardware & Desktop Adapters**:
+  - `ddcutil_backend`: Serialized per-bus queues, coalesced writes, `_last_written_val` caching to eliminate duplicate I2C traffic.
+  - `backlight_sysfs`: Direct kernel sysfs backlight access for internal laptop screens with `brightnessctl` and `xrandr` fallbacks.
+  - `color_x11`: Tanner-Helland 1000K–10000K Kelvin converter with X11 GPU gamma ramp mapping.
+  - `color_wayland`: Wayland compositor color management (Gammastep, KDE Plasma KWin Night Color D-Bus, GNOME Night Light).
+  - `colord_backend`: Gentle external color management conflict detection without process kill wars.
+  - `ambient_light`: Linux Industrial I/O (IIO) ambient illuminance reader with logarithmic perceptual response curve.
+- **Smart Automation Engine**: Continuous multi-waypoint circadian day/night curves (smooth cosine interpolation), ambient adaptation, idle dimming, and manual override tracking with auto-resume.
+- **Profiles & Scenes**: Pre-seeded system profiles (Daylight, Reading, Coding, Movie, Gaming, Night Owl, Candlelight), custom profiles, pre-apply snapshot backups with visual diff previews, and JSON import/export.
+- **Display Protection & VCP Safety**: Destructive factory-reset VCP commands (`0x04`, `0x05`, `0x08`) are strictly blocked. Input source switching (`0x60`) requires explicit confirmation.
 
-## Features
+---
 
-- **Per-monitor control** — individual brightness and contrast sliders for each DDC-capable monitor, plus a master slider for all at once
-- **Proper monitor names** — shows model names (e.g. "Dell P2414H") from EDID, not generic "VESA monitor"
-- **Instant startup** — state cache remembers monitors and last-used values; window appears immediately, hardware refresh runs in background
-- **Tray icon** — left-click opens popup, scroll wheel adjusts brightness, right-click for presets, refresh, redshift toggle
-- **Refresh monitors** — re-detect monitor hardware and clear state cache from right-click menu
-- **Standalone mode** — floating window as an alternative to the tray (`--standalone`)
-- **Color temperature** — per-monitor slider (3000K–6500K). X11: redshift's randr backend, scoped to each monitor's CRTC. Wayland: gammastep, one process per output
-- **Wayland and X11** — runs on both; on Wayland the popup is anchored top-right under the bar (layer-shell)
-- **Configurable presets** — define brightness/contrast/color_temp combos in a JSON config
-- **Light & dark icons** — embedded SVG tray icons with auto-detection or manual override (`--icon light|dark`)
-- **Lightweight** — single Python file, no build step, no pip packages
+## 🖥 5 UI Destinations
 
-## Requirements
+1. **Overview**: Live master controls, per-monitor slider cards, quick preset scenes, and automation status chips.
+2. **Displays**: Hardware capability inspector, MCCS version reporting, discrete VCP color presets (`0x14`), hardware RGB gains (`0x16`, `0x18`, `0x1A`), safe input switching (`0x60`), raw diagnostic VCP reader, and one-click display snapshot backup.
+3. **Profiles**: Scene cards, preview differences before applying, duplicate/delete/create, and JSON import/export.
+4. **Automation**: Circadian waypoints schedule table, ambient light adaptation toggle, idle dimming power saving, and configurable manual override pause timeout.
+5. **Settings & Diagnostics**: System permissions inspector (`/dev/i2c-*` nodes and user group membership), helper tool verification, hardware latency benchmarks, hotkey reference, and one-click diagnostic report JSON export.
 
-- Linux with an external monitor that supports DDC/CI
-- [ddcutil](https://www.ddcutil.com/)
-- Python 3.10+
-- GTK 3 (`python3-gi`, `gir1.2-gtk-3.0`)
-- redshift (optional, for color temperature on X11)
-- gammastep (optional, for color temperature on Wayland)
-- User must be in the `i2c` group
+---
 
-## Installation
+## ⌨ Command-Line Interface (CLI) & Scripting
 
-### Quick install (recommended)
+LumaTray provides a fast UNIX-socket IPC and standalone CLI:
 
 ```bash
-git clone https://github.com/musduz/ddc-slider.git
-cd ddc-slider
-chmod +x install.sh
-./install.sh
+# Toggle quick brightness popup
+lumatray --show
+
+# Open the full 5-tab Monitor Control Suite window
+lumatray --show-main
+
+# List all detected displays with identities, types, and current values
+lumatray --list-monitors
+
+# Adjust master values across all displays
+lumatray --set brightness 75
+lumatray --set contrast 50
+lumatray --set kelvin 4200
+
+# Target a specific monitor by ID
+lumatray --display internal_intel_backlight --set brightness 80
+
+# Apply a saved scene profile
+lumatray --apply-profile "Reading"
+lumatray --apply-profile "Night"
+
+# Toggle between Daylight (6500K) and Night (2700K)
+lumatray --toggle-night
+
+# Inspect circadian curve status and manual override countdown
+lumatray --circadian
+
+# Run hardware permissions and latency diagnostics
+lumatray --diagnose
+
+# Export diagnostics snapshot
+lumatray --export-diagnostics /tmp/report.json
 ```
 
-The installer handles dependencies, I2C permissions, man page, and autostart.
+---
 
-#### Custom prefix (no sudo needed)
+## 📦 Directory Structure
+
+```
+lumatray/
+├── bin/
+│   └── lumatray                     # Main executable wrapper
+├── src/
+│   └── lumatray/
+│       ├── __init__.py
+│       ├── __main__.py              # Entry point dispatcher
+│       ├── application.py           # Application lifecycle coordinator
+│       ├── core/                    # Models, errors, events, capabilities, validation
+│       │   ├── models.py
+│       │   ├── errors.py
+│       │   ├── events.py
+│       │   ├── validation.py
+│       │   └── capability_registry.py
+│       ├── backends/                # Hardware & desktop adapters
+│       │   ├── ddcutil_backend.py
+│       │   ├── backlight_sysfs.py
+│       │   ├── color_x11.py
+│       │   ├── color_wayland.py
+│       │   ├── colord_backend.py
+│       │   └── ambient_light.py
+│       ├── services/                # Business logic services
+│       │   ├── monitor_service.py
+│       │   ├── control_engine.py
+│       │   ├── color_service.py
+│       │   ├── profile_manager.py
+│       │   ├── automation_engine.py
+│       │   ├── osd_manager.py
+│       │   └── diagnostics.py
+│       ├── ui/                      # GTK3 interfaces & styles
+│       │   ├── styles.py
+│       │   ├── tray.py
+│       │   ├── quick_panel.py
+│       │   ├── osd.py
+│       │   ├── overview_view.py
+│       │   ├── displays_view.py
+│       │   ├── profiles_view.py
+│       │   ├── automation_view.py
+│       │   ├── settings_view.py
+│       │   └── main_window.py
+│       ├── integrations/            # Desktop integrations
+│       │   ├── dbus_service.py
+│       │   ├── cli.py
+│       │   ├── hotkeys.py
+│       │   └── desktop_events.py
+│       └── storage/                 # Persistence & configuration
+│           ├── config_store.py
+│           ├── profile_store.py
+│           └── migrations.py
+├── data/
+│   └── lumatray.desktop
+├── packaging/
+│   ├── PKGBUILD
+│   ├── systemd/lumatray.service
+│   └── udev/99-i2c-ddc.rules
+├── tests/
+│   ├── test_validation.py
+│   ├── test_models.py
+│   ├── test_events.py
+│   ├── test_circadian.py
+│   ├── test_color.py
+│   └── run_tests.py
+└── pyproject.toml
+```
+
+---
+
+## 🛠 Running Tests
+
+Execute the test suite:
 
 ```bash
-./install.sh --prefix ~/.local
+python3 tests/run_tests.py
 ```
 
-### Manual install — Arch Linux / Mabox / Manjaro
+---
 
-```bash
-sudo pacman -S ddcutil python-gobject gtk3
+## 📄 License
 
-# Load i2c-dev module
-sudo modprobe i2c-dev
-echo "i2c-dev" | sudo tee /etc/modules-load.d/i2c-dev.conf
-
-# I2C permissions
-sudo groupadd -f i2c
-sudo usermod -aG i2c $USER
-echo 'KERNEL=="i2c-[0-9]*", GROUP="i2c", MODE="0660"' | sudo tee /etc/udev/rules.d/99-i2c.rules
-sudo udevadm control --reload-rules && sudo udevadm trigger
-
-# Install
-sudo cp ddc-slider.py /usr/local/bin/ddc-slider
-sudo chmod 755 /usr/local/bin/ddc-slider
-sudo cp ddc-slider.1 /usr/local/share/man/man1/
-sudo chmod 644 /usr/local/share/man/man1/ddc-slider.1
-sudo cp release.txt /usr/local/share/ddc-slider/release.txt
-sudo chmod 644 /usr/local/share/ddc-slider/release.txt
-```
-
-Log out and back in for the `i2c` group to take effect.
-
-### Manual install — Ubuntu / Debian
-
-```bash
-sudo apt install ddcutil python3-gi gir1.2-gtk-3.0
-
-# Load i2c-dev module
-sudo modprobe i2c-dev
-echo "i2c-dev" | sudo tee /etc/modules-load.d/i2c-dev.conf
-
-# I2C permissions
-sudo groupadd -f i2c
-sudo usermod -aG i2c $USER
-echo 'KERNEL=="i2c-[0-9]*", GROUP="i2c", MODE="0660"' | sudo tee /etc/udev/rules.d/99-i2c.rules
-sudo udevadm control --reload-rules && sudo udevadm trigger
-
-# Install
-sudo cp ddc-slider.py /usr/local/bin/ddc-slider
-sudo chmod 755 /usr/local/bin/ddc-slider
-sudo cp ddc-slider.1 /usr/local/share/man/man1/
-sudo chmod 644 /usr/local/share/man/man1/ddc-slider.1
-sudo cp release.txt /usr/local/share/ddc-slider/release.txt
-sudo chmod 644 /usr/local/share/ddc-slider/release.txt
-```
-
-### Verify setup
-
-```bash
-# Check that ddcutil sees your monitors
-ddcutil detect
-```
-
-## Usage
-
-```bash
-ddc-slider                     # Tray icon mode (default)
-ddc-slider --standalone        # Floating window mode
-ddc-slider --icon light        # White tray icon (for dark panels)
-ddc-slider --icon dark         # Dark tray icon (for light panels)
-ddc-slider --bus 3             # Use a specific I2C bus
-ddc-slider --no-cache          # Force fresh hardware probe
-ddc-slider --get               # Print current brightness and exit
-ddc-slider --set 70            # Set brightness to 70 and exit
-ddc-slider --get-contrast      # Print current contrast and exit
-ddc-slider --set-contrast 50   # Set contrast to 50 and exit
-```
-
-### Tray icon controls
-
-| Action | Effect |
-|--------|--------|
-| Left-click | Toggle brightness/contrast popup |
-| Scroll wheel | Adjust brightness (all monitors) |
-| Right-click | Presets, redshift toggle, quit |
-
-On Wayland (StatusNotifierItem trays), left-click and scroll wheel are not available. Right-click → *Brightness slider* (or middle-click) opens the popup.
-
-### Wayland
-
-- Install `gtk-layer-shell` and `gammastep`.
-- Turn off the compositor's own night light (gammastep needs the gamma control), e.g. `noctalia msg nightlight-disable`.
-- Set `popup_margin_right` in the config to move the popup under the tray icon (pixels from the right screen edge, default 300).
-
-See `man ddc-slider` for full documentation.
-
-## Configuration
-
-Config file: `~/.config/ddc-slider/config.json`
-
-```json
-{
-  "scroll_step": 2,
-  "open_on_hotplug": false,
-  "presets": [
-    {
-      "name": "Movie",
-      "brightness": 30,
-      "contrast": 60,
-      "color_temp": 3500
-    },
-    {
-      "name": "Reading",
-      "brightness": 80,
-      "contrast": 40,
-      "color_temp": 5500
-    }
-  ],
-  "monitor_names": {
-    "3": "Philips",
-    "9": "Dell right"
-  }
-}
-```
-
-A default config is created on first run.
-
-## Files
-
-| Path | Description |
-|------|-------------|
-| `~/.config/ddc-slider/config.json` | Presets and scroll step |
-| `~/.config/ddc-slider/state.json` | Cached monitor state (auto-managed) |
-| `~/.config/ddc-slider/icons/` | SVG tray icons (auto-generated, replaceable) |
-
-## Autostart (default)
-
-To start ddc-slider on login, create `~/.config/autostart/ddc-slider.desktop`:
-
-```ini
-[Desktop Entry]
-Type=Application
-Name=DDC Slider
-Exec=ddc-slider
-Icon=display-brightness-symbolic
-StartupNotify=false
-X-GNOME-Autostart-enabled=true
-```
-
-## ddc-slider Launch  (To solve env)
-
-To use ddc-slider with gmrun, rofi, or desktop application menus, first create the wrapper script:
-
-```bash
-sudo tee /usr/local/bin/ddc-slider-launch > /dev/null << 'EOF'
-#!/bin/bash
-ddc-slider > /tmp/ddc-slider.log 2>&1 &
-exit 0
-EOF
-sudo chmod +x /usr/local/bin/ddc-slider-launch
-```
-
-Then create `~/.local/share/applications/ddc-slider.desktop`:
-
-```ini
-[Desktop Entry]
-Version=1.0
-Type=Application
-Name=DDC Brightness & Contrast
-Comment=Control monitor brightness and contrast via DDC/CI
-Icon=display-brightness-symbolic
-Exec=ddc-slider-launch
-Terminal=false
-Categories=Utility;Settings;
-Keywords=brightness;contrast;monitor;ddc;
-```
-
-Now you can launch it from:
-- **gmrun** (Alt+F2): Type "DDC" and press Enter
-- **rofi**: Alt+F2, search "DDC Brightness"
-- **Application menu**: Look for "DDC Brightness & Contrast"
-- **Command line**: `ddc-slider` or `ddc-slider-launch`
-
-The wrapper detaches cleanly and logs to `/tmp/ddc-slider.log`.
-
-## Troubleshooting
-
-**"Permission denied" on `/dev/i2c-*`**
-
-```bash
-# Check udev rule exists
-cat /etc/udev/rules.d/99-i2c.rules
-# Should contain: KERNEL=="i2c-[0-9]*", GROUP="i2c", MODE="0660"
-
-# Check group membership
-groups | grep i2c
-
-# If missing, add and relog
-sudo usermod -aG i2c $USER
-```
-
-**ddcutil can't find the monitor**
-
-```bash
-# Make sure i2c-dev is loaded
-sudo modprobe i2c-dev
-
-# Scan for monitors
-ddcutil detect
-
-# Check for "Invalid display" entries — those monitors don't support DDC/CI
-```
-
-**Tray icon invisible**
-
-```bash
-# Force white icon for dark panels
-ddc-slider --icon light
-
-# Force dark icon for light panels
-ddc-slider --icon dark
-```
-
-## Uninstall
-
-```bash
-# Via install script
-./install.sh --uninstall
-
-# With custom prefix
-./install.sh --uninstall --prefix ~/.local
-
-# User config (optional, delete manually)
-rm -rf ~/.config/ddc-slider
-```
-
-## Languages (only menu)
-
-    Translated UI strings (brightness, contrast, tooltips, menus):
-    - English (en)
-    - Dutch (nl)
-    - Polish (pl)
-    - German (de)
-    - Spanish (es)
-    - French (fr)
-    - Portuguese Brazilian (pt_BR)
-    - Italian (it)
-    - Russian (ru)
-    - Turkish (tr)
-    - Chinese Simplified (zh_CN)
-    - Japanese (jp)
-
-    falls back to English.
-
-_Todo translate manual & help._
-
-
-## Credits
-
-Original project: [xfce4-ddc-brightness-slider](https://github.com/krsnv/xfce4-ddc-brightness-slider) by Vladimir Krasnov (MIT License)
-
-Fork/rewrite by Musduz, 2026-04-05 — switched to ddcutil backend, added per-monitor controls, state cache, and tray icon variants.
-
-## License
-
-MIT
-
-NOTE:
-
-- ddccontrol: Last release 0.1.3 (2005), no longer in most distros. No longer maintained.
-https://www.ddcutil.com/ddccontrol/
-- ddcutil: Actively maintained, modern codebase, in all major distros
-- ddcutil author: [Sanford Rockowitz](https://github.com/rockowitz/ddcutil) (active development 2024+)
+MIT License. Designed and crafted for Linux monitor control.
