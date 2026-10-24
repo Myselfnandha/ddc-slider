@@ -971,7 +971,8 @@ class _SliderGroup:
     def __init__(self, vbox, monitor: MonitorInfo | None, min_val, max_val, step,
                  on_brightness, on_contrast, show_presets=False,
                  on_color_temp=None, show_contrast=True, show_color_temp=True,
-                 color_temp_min=COLOR_TEMP_MIN, color_temp_max=COLOR_TEMP_MAX):
+                 color_temp_min=COLOR_TEMP_MIN, color_temp_max=COLOR_TEMP_MAX,
+                 on_toggle_auto=None, is_auto_enabled=None):
         self.monitor = monitor
         self.is_applying_brightness = False
         self.is_applying_contrast = False
@@ -982,15 +983,28 @@ class _SliderGroup:
         self._on_brightness = on_brightness
         self._on_contrast = on_contrast
         self._on_color_temp = on_color_temp
+        self._on_toggle_auto = on_toggle_auto
+        self._is_auto_enabled = is_auto_enabled
         self.contrast_scale = None
         self.color_temp_scale = None
         self.color_temp_label = None
+        self.auto_btn: Gtk.Button | None = None
 
-        # --- Brightness ---
+        # --- Brightness with Auto Toggle ---
+        br_header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         title = Gtk.Label()
         title.set_markup(f"<b>{_('brightness')}</b>")
         title.set_xalign(0.0)
-        vbox.pack_start(title, False, False, 0)
+        br_header_box.pack_start(title, True, True, 0)
+
+        if on_toggle_auto:
+            self.auto_btn = Gtk.Button()
+            is_auto = is_auto_enabled() if is_auto_enabled else True
+            self.update_auto_btn(is_auto)
+            self.auto_btn.connect("clicked", lambda b: on_toggle_auto())
+            br_header_box.pack_end(self.auto_btn, False, False, 0)
+
+        vbox.pack_start(br_header_box, False, False, 0)
 
         hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         vbox.pack_start(hbox, True, True, 0)
@@ -1170,6 +1184,19 @@ class _SliderGroup:
         self.set_color_temp(value)
         self._apply_color_temp(value)
 
+    def update_auto_btn(self, is_auto: bool):
+        if self.auto_btn:
+            self.auto_btn.set_label("⚡ Auto: ON" if is_auto else "⚡ Auto: OFF")
+            self.auto_btn.set_tooltip_text("Auto Mode is active. Click to turn OFF." if is_auto else "Auto Mode is OFF. Click to turn ON.")
+            ctx = self.auto_btn.get_style_context()
+            if is_auto:
+                ctx.remove_class("auto-btn-off")
+                ctx.add_class("auto-btn-on")
+            else:
+                ctx.remove_class("auto-btn-on")
+                ctx.add_class("auto-btn-off")
+
+
 
 # ---------------------------------------------------------------------------
 #  Brightness popup window
@@ -1243,6 +1270,23 @@ class BrightnessPopup(Gtk.Window):
                 font-size: 11px;
                 border-radius: 4px;
             }
+            button.auto-btn-on {
+                background-color: #10b981;
+                color: #ffffff;
+                font-weight: bold;
+                border-radius: 4px;
+            }
+            button.auto-btn-on:hover {
+                background-color: #059669;
+            }
+            button.auto-btn-off {
+                background-color: rgba(255, 255, 255, 0.12);
+                color: #94a3b8;
+                border-radius: 4px;
+            }
+            button.auto-btn-off:hover {
+                background-color: rgba(255, 255, 255, 0.2);
+            }
         """)
         Gtk.StyleContext.add_provider_for_screen(
             Gdk.Screen.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
@@ -1266,13 +1310,9 @@ class BrightnessPopup(Gtk.Window):
         app_title.set_xalign(0.0)
         top_bar.pack_start(app_title, True, True, 0)
 
-        if self._on_toggle_auto and self._is_auto_enabled:
-            is_auto = self._is_auto_enabled()
-            self._auto_btn = Gtk.Button(label="⚡ Auto: ON" if is_auto else "⚡ Auto: OFF")
-            self._auto_btn.set_tooltip_text("Auto Mode is active. Click to turn OFF." if is_auto else "Auto Mode is OFF. Click to turn ON.")
-            self._auto_btn.connect("clicked", self._on_auto_clicked)
-            top_bar.pack_end(self._auto_btn, False, False, 0)
-
+        self._auto_btn = Gtk.Button()
+        self._auto_btn.connect("clicked", self._on_auto_clicked)
+        top_bar.pack_end(self._auto_btn, False, False, 0)
         self._main_box.pack_start(top_bar, False, False, 2)
 
         if multi:
@@ -1297,7 +1337,9 @@ class BrightnessPopup(Gtk.Window):
                 show_contrast=show_contrast,
                 show_color_temp=show_ct,
                 color_temp_min=ct_min,
-                color_temp_max=ct_max)
+                color_temp_max=ct_max,
+                on_toggle_auto=self._on_auto_clicked,
+                is_auto_enabled=self._is_auto_enabled)
 
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -1343,7 +1385,9 @@ class BrightnessPopup(Gtk.Window):
                 show_contrast=show_contrast,
                 show_color_temp=show_ct,
                 color_temp_min=ct_min,
-                color_temp_max=ct_max)
+                color_temp_max=ct_max,
+                on_toggle_auto=self._on_auto_clicked,
+                is_auto_enabled=self._is_auto_enabled)
 
             group.set_brightness(mon.current_brightness)
             if group.contrast_scale:
@@ -1354,6 +1398,8 @@ class BrightnessPopup(Gtk.Window):
             self._monitor_groups.append(group)
 
         self._sync_master()
+        is_auto = self._is_auto_enabled() if self._is_auto_enabled else True
+        self.update_auto_btn_state(is_auto)
 
     def _reposition_at(self, x: int, y: int):
         display = Gdk.Display.get_default()
@@ -1580,15 +1626,26 @@ class BrightnessPopup(Gtk.Window):
         finally:
             self._programmatic_update = False
 
-    def _on_auto_clicked(self, btn):
+    def _on_auto_clicked(self, btn=None):
         if self._on_toggle_auto:
             new_st = self._on_toggle_auto()
             self.update_auto_btn_state(new_st)
 
     def update_auto_btn_state(self, is_auto: bool):
-        if self._auto_btn:
+        if getattr(self, "_auto_btn", None):
             self._auto_btn.set_label("⚡ Auto: ON" if is_auto else "⚡ Auto: OFF")
             self._auto_btn.set_tooltip_text("Auto Mode is active. Click to turn OFF." if is_auto else "Auto Mode is OFF. Click to turn ON.")
+            ctx = self._auto_btn.get_style_context()
+            if is_auto:
+                ctx.remove_class("auto-btn-off")
+                ctx.add_class("auto-btn-on")
+            else:
+                ctx.remove_class("auto-btn-on")
+                ctx.add_class("auto-btn-off")
+        if getattr(self, "_master_group", None):
+            self._master_group.update_auto_btn(is_auto)
+        for g in getattr(self, "_monitor_groups", []):
+            g.update_auto_btn(is_auto)
 
     def hide(self):
         super().hide()
@@ -1982,12 +2039,19 @@ class TrayApp:
         self._saved_daylight_state = None
         self._transition_thread = None
         self._transition_cancel = threading.Event()
+        self.status_icon = None
+        self.indicator = None
+
+        # Automatic Day/Night & Circadian Mode Scheduler
+        self.scheduler = DayNightScheduler(self)
 
         self.popup = BrightnessPopup(monitors, min_val, max_val, step,
                                      on_color_temp=self._on_color_temp,
                                      on_contrast=self._on_contrast,
                                      on_value_changed=self._on_user_value_changed,
-                                     config=self.config)
+                                     config=self.config,
+                                     on_toggle_auto=self._toggle_auto_schedule_from_popup,
+                                     is_auto_enabled=self.scheduler.is_enabled)
         self._cached_brightness = None
         self._scroll_debounce_id = None
         self._redshift_paused = False
@@ -1996,9 +2060,6 @@ class TrayApp:
         if cached_state:
             self.popup.apply_cached_values(cached_state)
             self._restore_color_temps(cached_state)
-
-        self.status_icon = None
-        self.indicator = None
 
         n = len(monitors)
         tooltip = _("tooltip_multi", n=n) if n > 1 else _("tooltip")
@@ -2030,19 +2091,17 @@ class TrayApp:
         # Start single-instance IPC socket server
         self._setup_ipc_server()
 
-        # Automatic Day/Night & Circadian Mode Scheduler
-        self.scheduler = DayNightScheduler(self)
+        # Start automatic scheduler and update popup buttons
         self.scheduler.start()
-
-        # Connect popup auto toggle button to scheduler
-        self.popup._on_toggle_auto = self._toggle_auto_schedule_from_popup
-        self.popup._is_auto_enabled = self.scheduler.is_enabled
         self.popup.update_auto_btn_state(self.scheduler.is_enabled())
 
     def _toggle_auto_schedule_from_popup(self) -> bool:
         new_st = not self.scheduler.is_enabled()
         self.scheduler.set_enabled(new_st)
+        self.popup.update_auto_btn_state(new_st)
         self.refresh_tray_menu()
+        if new_st and self.scheduler.is_circadian_mode():
+            self.scheduler.resume_auto_schedule()
         return new_st
 
     def _on_user_value_changed(self):
