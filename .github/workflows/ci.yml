@@ -10,26 +10,16 @@ jobs:
   test:
     name: Unit Tests & Validation
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ['3.10', '3.11', '3.12']
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Install Dependencies
+      - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgirepository1.0-dev libcairo2-dev gir1.2-gtk-3.0
-          python -m pip install --upgrade pip
-          pip install PyGObject
+          sudo apt-get install -y python3-gi gir1.2-gtk-3.0 python3-gi-cairo
 
       - name: Run Test Suite
         run: |
-          python tests/run_tests.py
+          python3 tests/run_tests.py
